@@ -210,15 +210,23 @@ rather than advisory.
 
 ## Daily operations
 
-| Task | Command |
-|---|---|
-| Start | `docker compose up -d` (or `make run`) |
-| Stop | `docker compose down` (or `make stop`) |
-| Restart | `docker compose restart sol-trading-bot` |
-| Status | `make status` |
-| Verify the running config is approved | `make verify-running` |
-| Logs | `make logs` |
-| Container state | `docker compose ps` |
+> **`make` is a convenience, not a dependency.** It is not installed on
+> `srv1792440`, and every `make` target in this document is a one-line alias for
+> the `docker compose` command shown beside it. The raw command is authoritative
+> — reach for it first, especially in an incident. Install the shorthand with
+> `apt install -y make` if you want it.
+
+| Task | Command | Shorthand |
+|---|---|---|
+| Start | `docker compose up -d` | `make run` |
+| Stop | `docker compose down` | `make stop` |
+| Restart | `docker compose restart sol-trading-bot` | `make restart` |
+| Status | `docker compose exec -T sol-trading-bot python -m app.cli status` | `... python -m app.cli status` |
+| Verify running config | `docker compose exec -T sol-trading-bot python -m app.cli verify` | `make verify-running` |
+| Positions | `docker compose exec -T sol-trading-bot python -m app.cli positions` | `make positions` |
+| Open orders | `docker compose exec -T sol-trading-bot python -m app.cli open-orders` | `... python -m app.cli open-orders` |
+| Logs | `docker compose logs -f --tail=200 sol-trading-bot` | `make logs` |
+| Container state | `docker compose ps` | `make ps` |
 
 `restart: unless-stopped` means the bot returns automatically after a VPS
 reboot. `KILL_SWITCH=true` persists in `.env`, so it comes back halted.
@@ -230,7 +238,7 @@ reboot. `KILL_SWITCH=true` persists in `.env`, so it comes back halted.
 ```bash
 docker compose ps                                    # health column
 docker inspect --format '{{.State.Health.Status}}' sol-trading-bot
-make health                                          # run the healthcheck directly
+docker compose exec -T sol-trading-bot python /app/scripts/healthcheck.py
 ```
 
 **Healthy does not mean trading.** A kill-switched bot is healthy — it is doing
@@ -241,7 +249,7 @@ status`.
 Reading the full status:
 
 ```bash
-make status
+docker compose exec -T sol-trading-bot python -m app.cli status
 ```
 
 | Field | Meaning |
@@ -260,9 +268,8 @@ make status
 ## Inspecting logs
 
 ```bash
-make logs                                    # follow container stdout
-docker compose logs --tail=200 sol-trading-bot
-tail -f logs/trading.log                     # the rotated file on the host
+docker compose logs -f --tail=200 sol-trading-bot   # follow container stdout
+tail -f logs/trading.log                            # the rotated file on the host
 ```
 
 Logs are one JSON object per line. Useful queries:
@@ -293,13 +300,13 @@ sqlite3 data/trading.db "SELECT occurred_at, level, event, message FROM bot_even
 ## Broker connectivity
 
 ```bash
-make broker-status
+docker compose exec -T sol-trading-bot python -m app.cli broker-status
 ```
 
 In mock mode this reports `broker_implementation: mock` and
 `ib_port_in_use: null` — correct, because mock mode never opens a socket.
 
-Once IB Gateway exists, `make status` shows `broker.connection_state`,
+Once IB Gateway exists, `app.cli status` shows `broker.connection_state`,
 `broker.account_type`, and `broker.last_heartbeat_age_seconds`.
 
 **On disconnect the bot enters `SAFE`, refuses all orders, clears its market
@@ -312,10 +319,11 @@ never retried — they will not resolve by trying again.
 ## Positions and orders
 
 ```bash
-make positions       # from the reconciled local book
-make open-orders     # working orders
-make contract-info   # qualified contract metadata
-make db-info         # schema version and row counts
+E=(docker compose exec -T sol-trading-bot python -m app.cli)
+"${E[@]}" positions       # from the reconciled local book
+"${E[@]}" open-orders     # working orders
+"${E[@]}" contract-info   # qualified contract metadata
+"${E[@]}" db-info         # schema version and row counts
 ```
 
 These read the database, so they are safe to run while the bot is trading and
@@ -335,8 +343,12 @@ sqlite3 data/trading.db "SELECT decided_at, approved, reasons FROM risk_decision
 **Stop all new orders right now:**
 
 ```bash
-make kill-switch-on REASON="describe what is happening"
+docker compose exec -T sol-trading-bot \
+  python -m app.cli kill-switch-on --reason "describe what is happening"
 ```
+
+(`make kill-switch-on REASON="..."` is the same thing, if `make` is installed.
+It is not, on `srv1792440` — do not reach for it under pressure.)
 
 This latches the switch durably in the database. The running process stops
 producing actionable trades on its next tick.
@@ -351,7 +363,7 @@ docker compose restart sol-trading-bot
 **Check it:**
 
 ```bash
-make kill-switch-status
+docker compose exec -T sol-trading-bot python -m app.cli kill-switch-status
 ```
 
 There is deliberately **no** `kill-switch-off` command. To resume trading, edit
@@ -364,7 +376,8 @@ The kill switch does **not** close positions. That is a separate decision.
 ## Emergency: cancel all orders
 
 ```bash
-make cancel-all-orders REASON="describe what is happening"
+docker compose exec -T sol-trading-bot \
+  python -m app.cli cancel-all-orders --confirm --reason "describe what is happening"
 ```
 
 Cancels every working order at the broker. **It does not close positions.**
@@ -383,8 +396,8 @@ reconcile, then `READY`. No action needed unless it persists.
 If it persists:
 
 ```bash
-make status | grep -A6 '"broker"'
-make logs | grep broker
+docker compose exec -T sol-trading-bot python -m app.cli status | grep -A6 '"broker"'
+docker compose logs --tail=200 sol-trading-bot | grep broker
 ```
 
 - `BrokerConnectionError` → is IB Gateway running? Is it listening on the
@@ -400,7 +413,7 @@ make logs | grep broker
 
 ```bash
 docker compose ps                # healthy?
-make status                      # gate still refusing?
+docker compose exec -T sol-trading-bot python -m app.cli verify   # posture approved?
 docker ps --filter name=traefik  # Traefik back?
 ```
 
@@ -422,7 +435,8 @@ where more automated trading is the right answer. The bot stays in `SAFE` and
 refuses everything.
 
 ```bash
-make status | python3 -c "import json,sys;print(json.dumps(json.load(sys.stdin)['reconciliation'], indent=2))"
+docker compose exec -T sol-trading-bot python -m app.cli status \
+  | python3 -c "import json,sys;print(json.dumps(json.load(sys.stdin)['reconciliation'], indent=2))"
 ```
 
 | Discrepancy | Meaning | Action |
@@ -434,7 +448,8 @@ make status | python3 -c "import json,sys;print(json.dumps(json.load(sys.stdin)[
 
 Once you have established the truth:
 
-1. Engage the kill switch: `make kill-switch-on REASON="reconciliation mismatch"`
+1. Engage the kill switch:
+   `docker compose exec -T sol-trading-bot python -m app.cli kill-switch-on --reason "reconciliation mismatch"`
 2. Resolve the underlying discrepancy at IBKR.
 3. Correct the local record if needed (below).
 4. Restart and confirm reconciliation succeeds.
@@ -442,7 +457,7 @@ Once you have established the truth:
 ### Database problems
 
 ```bash
-make db-info
+docker compose exec -T sol-trading-bot python -m app.cli db-info
 sqlite3 data/trading.db "PRAGMA integrity_check;"
 ```
 
@@ -469,7 +484,7 @@ Reconcile against IBKR first, then:
 ```bash
 mv data/trading.db data/trading.db.corrupt
 docker compose up -d      # migrations recreate the schema
-make status               # expect reconciliation to fail until state is restored
+docker compose exec -T sol-trading-bot python -m app.cli status   # expect reconciliation to fail
 ```
 
 ### Container unhealthy
@@ -587,7 +602,7 @@ KILL_SWITCH=true               # still true
 SOL_FUTURES_PERMISSION_READY=false
 ```
 
-Restart and confirm from `make status`:
+Restart and confirm from `app.cli status`:
 
 - `broker.connection_state` is `connected`
 - `broker.account_type` is **`paper`** — if it says `live`, stop immediately;
@@ -597,7 +612,7 @@ Restart and confirm from `make status`:
 ### 7. Verify the contract
 
 ```bash
-make contract-info
+docker compose exec -T sol-trading-bot python -m app.cli contract-info
 ```
 
 Confirm against IBKR's contract search: `conId`, `localSymbol`, `multiplier`,
@@ -627,7 +642,7 @@ run for a full session and confirm:
 
 - reconciliation succeeds on every reconnect
 - market data stays fresh during liquid hours
-- no orders are created (`make open-orders` stays at zero)
+- no orders are created (`app.cli open-orders` stays at zero)
 - disconnect/reconnect recovers cleanly
 
 ### 10. Only then: controlled paper orders

@@ -489,6 +489,11 @@ configuration is not the approved one. It has no code path that writes it.
 
 ## Operator commands
 
+> `make` is a convenience wrapper. It is **not** installed on the production
+> host, and every target below is a one-line alias for a `docker compose exec`
+> command. `RUNBOOK.md` gives the raw form of each, which is what to use in an
+> incident.
+
 ```bash
 make status                                 # full status
 make broker-status                          # broker configuration and events
@@ -499,6 +504,7 @@ make db-info                                # database file and row counts
 make kill-switch-status                     # kill switch state
 make kill-switch-on REASON="why"            # engage the kill switch, durably
 make cancel-all-orders                      # cancel working orders (NOT positions)
+make verify-running                         # assert the running config is approved
 ```
 
 There is deliberately **no** `kill-switch-off` and **no** `enable-live`.
