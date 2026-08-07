@@ -250,6 +250,26 @@ repositories only. Making this repository private on the Free plan silently
 stops enforcement while continuing to display the rule. If visibility changes,
 re-verify by attempting a direct push to `main` and confirming it is rejected.
 
+### Repository visibility
+
+**This repository is deliberately public.** That is a decision, not an
+oversight, and it is coupled to the section above: on the GitHub Free plan,
+branch protection is enforced on public repositories only. Making this
+repository private without also upgrading would silently switch off the
+protection on `main` while continuing to display the rule.
+
+It is safe to be public today because it contains no secrets. `.env` is
+gitignored, has never been committed, and CI fails the build if any environment
+file, credential, or trading-enabling default appears in the tree. What is
+exposed is infrastructure, and the infrastructure's safety does not depend on
+anybody not reading it.
+
+**Revisit when strategy code lands.** A trading strategy is the first thing here
+that would be genuinely worth concealing, and by then the *history* matters too,
+not just the tip. At that point go private **and** move to a plan or a Ruleset
+that keeps protection enforced — then confirm it survived by attempting a direct
+push to `main` and checking that it is rejected rather than bypassed.
+
 ### SSH
 
 - Authentication by **deploy key only**. No password is stored in GitHub.
