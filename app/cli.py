@@ -28,6 +28,7 @@ from app.config import Config, ConfigError
 from app.enums import TradingMode
 from app.monitoring.status import build_info, safety_summary
 from app.safety.killswitch import KillSwitch
+from app.safety.posture import evaluate_posture, failing_checks, posture_is_approved
 from app.state.database import Database, DatabaseError
 from app.state.repositories import Repositories
 from app.utilities.timeutils import utc_now
@@ -269,6 +270,39 @@ def cmd_db_info(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_verify(config: Config, args: argparse.Namespace) -> int:
+    """Verify the configuration this process actually parsed.
+
+    `scripts/verify_safety.sh` checks what the .env file says. This checks what
+    the running process holds, which differs whenever a hosting control panel,
+    a compose override, or a stale container injects values the file never saw.
+
+    Exits non-zero if the posture is not the approved one, and also if the
+    checks themselves come back incomplete -- an unreadable result is a failure,
+    never a pass.
+    """
+    del args
+    database, repos = _open_database(config)
+    try:
+        kill_switch = KillSwitch(config_engaged=config.kill_switch, store=repos.state)
+        checks = evaluate_posture(config, kill_switch_engaged=kill_switch.engaged())
+    finally:
+        database.close()
+
+    approved = posture_is_approved(checks)
+    failures = failing_checks(checks)
+    _emit(
+        {
+            "result": "APPROVED_POSTURE" if approved else "POSTURE_NOT_APPROVED",
+            "source": "the configuration this running process parsed, not the .env file",
+            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
+            "failures": [c.name for c in failures],
+            **build_info(config),
+        }
+    )
+    return EXIT_OK if approved else EXIT_ERROR
+
+
 def cmd_config(config: Config, args: argparse.Namespace) -> int:
     del args
     _emit({"config": config.redacted(), **build_info(config)})
@@ -290,6 +324,7 @@ COMMANDS = {
     "cancel-all-orders": cmd_cancel_all_orders,
     "db-info": cmd_db_info,
     "config": cmd_config,
+    "verify": cmd_verify,
 }
 
 

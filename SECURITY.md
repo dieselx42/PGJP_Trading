@@ -250,6 +250,40 @@ repositories only. Making this repository private on the Free plan silently
 stops enforcement while continuing to display the rule. If visibility changes,
 re-verify by attempting a direct push to `main` and confirming it is rejected.
 
+### Configuration must have exactly one source
+
+`/opt/sol-futures-trading-bot/.env` is the only place production configuration
+lives. Do **not** enter environment variables into a hosting control panel
+(Hostinger's Docker Manager, Portainer, or similar), and leave any such panel
+empty.
+
+The reason is not tidiness. `scripts/verify_safety.sh` reads the `.env` file. If
+a second source injects `TRADING_MODE` or `KILL_SWITCH`, that check reports
+`RESULT: safe.` — truthfully, about a file that is no longer authoritative —
+while the container runs with something else.
+
+Two defences:
+
+* **`.env.example` contains no `=` inside comments.** Naive importers split
+  every line on the first `=`, including comment lines. Hostinger's Docker
+  Manager did exactly this to an earlier version of the file, turning the
+  comment `# ... if LIVE_TRADING_ENABLED=true while` into a variable named
+  `# ... if LIVE_TRADING_ENABL…` with the value `true while`, and `# =====`
+  banner lines into a variable literally named `#`. Comments now use `-`.
+
+* **`python -m app.cli verify` checks the running process, not the file.** It
+  reports the configuration the container actually parsed and exits non-zero if
+  it is not the approved posture. `scripts/deploy.sh` runs it after every
+  deploy, and CI proves it fails closed by injecting
+  `ALLOW_ORDER_TRANSMIT=true` into a container and asserting the check rejects
+  it.
+
+Run it any time the deployment is touched:
+
+```bash
+make verify-running
+```
+
 ### Repository visibility
 
 **This repository is deliberately public.** That is a decision, not an

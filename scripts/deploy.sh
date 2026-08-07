@@ -93,6 +93,14 @@ fi
 
 # -----------------------------------------------------------------------------
 log "Post-deploy verification"
+
+# verify_safety.sh (above) checked what .env SAYS. This checks what the running
+# process actually parsed, which differs whenever a hosting control panel, a
+# compose override, or a stale container injects values the file never saw.
+if ! docker compose exec -T "$SERVICE" python -m app.cli verify; then
+    fail "the running container is NOT in the approved posture; see the failures above"
+fi
+
 docker compose exec -T "$SERVICE" python -m app.cli kill-switch-status
 
 log "Deployed $GIT_COMMIT successfully. Trading remains disabled by configuration."
