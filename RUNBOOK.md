@@ -120,9 +120,19 @@ LOG_LEVEL=INFO
 ```bash
 bash scripts/verify_safety.sh .env    # must print "RESULT: safe."
 sudo bash scripts/bootstrap_dirs.sh   # creates ./data and ./logs as uid 10001
+
+# Stamp the image with its provenance. A bare `docker compose build` leaves
+# GIT_COMMIT and BUILD_TIMESTAMP empty, and /status then reports "unknown" --
+# which makes it impossible to tell which commit is actually running.
+export GIT_COMMIT="$(git rev-parse --short HEAD)"
+export BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 docker compose build
 docker compose up -d
 ```
+
+> If `git rev-parse` reports *"detected dubious ownership"*, the repository is
+> owned by `soldeploy` and you are running as `root`. Fix it once with:
+> `git config --global --add safe.directory /opt/sol-futures-trading-bot`
 
 ### 6. Confirm
 

@@ -404,7 +404,7 @@ safety tests while being useless.
 ## Docker
 
 ```bash
-make build      # build the image
+make build      # build the image (stamps GIT_COMMIT and BUILD_TIMESTAMP)
 make run        # verify safety, prepare dirs, start detached
 make status     # full application status
 make logs       # follow logs
@@ -424,6 +424,10 @@ The image:
 
 `docker-compose.yml` publishes **no ports** and carries **no Traefik labels**.
 CI fails the build if either changes.
+
+Prefer `make build` over a bare `docker compose build`: the Makefile stamps
+`GIT_COMMIT` and `BUILD_TIMESTAMP` into the image, and without them `/status`
+reports the running version as `unknown`.
 
 ---
 
