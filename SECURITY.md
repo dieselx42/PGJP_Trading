@@ -250,38 +250,72 @@ repositories only. Making this repository private on the Free plan silently
 stops enforcement while continuing to display the rule. If visibility changes,
 re-verify by attempting a direct push to `main` and confirming it is rejected.
 
-### Configuration must have exactly one source
+### The hosting control panel edits `.env` — it does not overlay it
 
-`/opt/sol-futures-trading-bot/.env` is the only place production configuration
-lives. Do **not** enter environment variables into a hosting control panel
-(Hostinger's Docker Manager, Portainer, or similar), and leave any such panel
-empty.
+> **Do not save changes in Hostinger's Docker Manager "Environment" panel.**
+> Close it without saving. Manage this stack only from
+> `/opt/sol-futures-trading-bot` with `docker compose`.
 
-The reason is not tidiness. `scripts/verify_safety.sh` reads the `.env` file. If
-a second source injects `TRADING_MODE` or `KILL_SWITCH`, that check reports
-`RESULT: safe.` — truthfully, about a file that is no longer authoritative —
-while the container runs with something else.
+This is the single most important operational warning in this document, because
+getting it wrong destroyed the production configuration once already.
 
-Two defences:
+**What the panel is.** It reads `.env`, displays each variable as a row, and
+**writes the rows back to `.env` when saved**. It is an editor of the single
+source of truth, not a separate layer on top of it. Emptying the panel empties
+the file.
 
-* **`.env.example` contains no `=` inside comments.** Naive importers split
-  every line on the first `=`, including comment lines. Hostinger's Docker
-  Manager did exactly this to an earlier version of the file, turning the
-  comment `# ... if LIVE_TRADING_ENABLED=true while` into a variable named
-  `# ... if LIVE_TRADING_ENABL…` with the value `true while`, and `# =====`
-  banner lines into a variable literally named `#`. Comments now use `-`.
+**What went wrong.** The panel displayed all 38 variables correctly, plus two
+invalid rows its parser had produced from comment lines (see below). Acting on
+advice to "leave the panel empty", every row was deleted and saved. `.env`
+became one byte. The container was recreated with no configuration at all.
+
+**What the application did about it.** Every value fell through to its default,
+and the system landed in its most restrictive state:
+
+```
+state                     SAFE
+trading_mode              disabled     ← no broker object is constructed at all
+kill_switch               true
+allow_order_transmit      false
+can_transmit_live_orders  false
+all six risk limits       0
+```
+
+Total configuration loss produced maximum restriction. That is the fail-closed
+design working: a system reading absent configuration as "no limits" would have
+come up trading-capable with an empty file.
+
+**How it was caught.** `python -m app.cli verify` reported
+`TRADING_MODE: disabled (approved: mock)` on its first real use. The file-based
+`verify_safety.sh` had not been run, because the redeploy went through
+`docker compose` directly — which is why that check is now part of the
+documented redeploy path rather than an optional extra.
+
+### Defences now in place
+
+* **`.env.example` contains no `=` inside comments.** The panel's importer
+  splits every line on the first `=`, including comments. It turned
+  `# ... if LIVE_TRADING_ENABLED=true while` into a variable named
+  `# ... if LIVE_TRADING_ENABL…` valued `true while`, and `# =====` banner lines
+  into a variable named `#`. Comments now use `-`, so the file imports cleanly.
+  Saving the panel would still strip every comment from `.env`; the values
+  would survive, the documentation would not.
+
+* **`scripts/verify_safety.sh` detects an emptied or truncated file** and says
+  so explicitly, naming the likely cause, rather than emitting twelve separate
+  "not set" failures that obscure it.
 
 * **`python -m app.cli verify` checks the running process, not the file.** It
   reports the configuration the container actually parsed and exits non-zero if
   it is not the approved posture. `scripts/deploy.sh` runs it after every
-  deploy, and CI proves it fails closed by injecting
-  `ALLOW_ORDER_TRANSMIT=true` into a container and asserting the check rejects
-  it.
+  deploy, and CI proves it fails closed by injecting `ALLOW_ORDER_TRANSMIT=true`
+  into a live container and asserting rejection.
 
-Run it any time the deployment is touched:
+Run both any time the deployment is touched:
 
 ```bash
-make verify-running
+bash scripts/verify_safety.sh .env                                  # the file
+docker compose exec -T sol-trading-bot python -m app.cli verify      # the process
 ```
 
 ### Repository visibility

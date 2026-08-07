@@ -501,6 +501,39 @@ Common causes:
   `bash scripts/verify_safety.sh .env`
 - database unreadable → see above
 
+### Configuration was wiped by the hosting control panel
+
+**Symptom:** `app.cli verify` reports values that do not match `.env` — most
+visibly `TRADING_MODE: disabled (approved: mock)`, because `disabled` is what an
+absent `TRADING_MODE` falls back to.
+
+**Cause:** Hostinger's Docker Manager "Environment" panel *edits* `.env`; it
+does not overlay it. Saving an empty panel writes an empty file.
+
+**Confirm:**
+
+```bash
+ls -l .env && wc -c .env          # a healthy file is ~5-6 KB
+grep -c '^[A-Z_]*=' .env          # expect 38
+```
+
+**Recover:**
+
+```bash
+cd /opt/sol-futures-trading-bot
+sudo -u soldeploy cp .env.example .env
+sudo -u soldeploy chmod 600 .env
+sudo -u soldeploy sed -i 's/^DEFAULT_CONTRACT_MONTH=$/DEFAULT_CONTRACT_MONTH=202612/' .env
+bash scripts/verify_safety.sh .env                # must print "RESULT: safe."
+docker compose up -d --force-recreate
+docker compose exec -T sol-trading-bot python -m app.cli verify
+```
+
+`--force-recreate` is required. `docker compose restart` does **not** re-read
+`env_file`, so a plain restart keeps the broken configuration.
+
+**Prevent:** do not save that panel. Edit `.env` on the server directly.
+
 ### Rolling back a deployment
 
 ```bash
@@ -531,6 +564,19 @@ is not the approved configuration.
 ```bash
 cd /opt/sol-futures-trading-bot
 bash scripts/deploy.sh main
+```
+
+**Use `deploy.sh` rather than running `docker compose` by hand.** It verifies
+`.env` *before* building and verifies the running process *after* starting, and
+rolls back if the container does not become healthy. A manual
+`docker compose build && docker compose up -d` skips both checks — that is how
+an emptied `.env` reached a running container once already.
+
+If you do deploy by hand, run both checks yourself:
+
+```bash
+bash scripts/verify_safety.sh .env                                 # before
+docker compose exec -T sol-trading-bot python -m app.cli verify     # after
 ```
 
 ### What a deployment can and cannot do
