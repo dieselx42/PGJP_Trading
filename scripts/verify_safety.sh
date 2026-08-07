@@ -55,6 +55,48 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 
+# An emptied or truncated .env is reported explicitly rather than as twelve
+# separate "not set" failures, because the cause and the fix are different.
+#
+# This is not hypothetical. Hostinger's Docker Manager edits .env DIRECTLY
+# rather than overlaying it: clearing its Environment panel wrote an empty file
+# back to disk, the container came up with no configuration at all, and every
+# value fell through to its default. The application landed in its most
+# restrictive state, which is the design working -- but the file had been
+# silently destroyed.
+# `grep -c` prints 0 AND exits non-zero when there are no matches, so a
+# `|| echo 0` fallback yields the string "0\n0". Piping through wc -l always
+# gives exactly one number and exit status 0.
+VARIABLE_COUNT="$(grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=' "$ENV_FILE" 2>/dev/null | wc -l)"
+MINIMUM_VARIABLES=10
+
+if [ "$VARIABLE_COUNT" -eq 0 ]; then
+    echo "  [FAIL] $ENV_FILE contains no variables at all ($(wc -c < "$ENV_FILE") bytes)."
+    echo
+    echo "  The file has been emptied. Every setting would fall back to its"
+    echo "  default, which is safe but is NOT the deployed configuration."
+    echo
+    echo "  Most likely cause: a hosting control panel rewrote it. Hostinger's"
+    echo "  Docker Manager edits .env directly -- do not manage this stack from"
+    echo "  that UI."
+    echo
+    echo "  Restore with:"
+    echo "    cp .env.example .env && chmod 600 .env"
+    echo "    # then re-apply DEFAULT_CONTRACT_MONTH and any local settings"
+    exit 1
+fi
+
+if [ "$VARIABLE_COUNT" -lt "$MINIMUM_VARIABLES" ]; then
+    echo "  [FAIL] $ENV_FILE has only $VARIABLE_COUNT variable(s); expected at least $MINIMUM_VARIABLES."
+    echo
+    echo "  The file looks truncated. Compare it against .env.example before"
+    echo "  starting anything."
+    exit 1
+fi
+
+echo "  [ ok ] $ENV_FILE defines $VARIABLE_COUNT variables"
+echo
+
 # -----------------------------------------------------------------------------
 echo "Interlocks:"
 expect TRADING_MODE                 mock
