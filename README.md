@@ -449,6 +449,28 @@ reports the running version as `unknown`.
 `.github/workflows/deploy.yml` is **`workflow_dispatch` only**. There is no
 `push` trigger: a git push cannot reach the trading server on its own.
 
+### Making changes
+
+`main` is protected. Direct pushes are rejected — every change goes through a
+pull request, and all four CI jobs must pass before it can merge:
+
+```bash
+git checkout -b my-change
+# ... edit, then:
+make check                    # lint + mypy + tests, the same as CI
+git commit -am "..."
+git push -u origin my-change
+# open a PR against main; merge once CI is green
+```
+
+The protection also requires branches to be **up to date** before merging, so a
+PR that passed CI against a stale `main` has to be refreshed and re-tested. That
+closes the gap where two independently-green changes break once combined —
+which, in a system whose whole job is refusing unsafe orders, is exactly the
+kind of interaction worth catching before it lands.
+
+Force pushes and branch deletion on `main` are blocked.
+
 ---
 
 ## Deployment
