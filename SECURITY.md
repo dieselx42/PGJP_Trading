@@ -278,6 +278,82 @@ port.
 
 ---
 
+## Verified posture: srv1792440.hstgr.cloud
+
+Audited and hardened 2026-08-07. Ubuntu 24.04.4 LTS, 2 vCPU, 7.8 GiB RAM,
+Docker 29.5.3, Compose v5.1.4.
+
+### SSH
+
+```
+permitrootlogin              without-password   (alias of prohibit-password)
+passwordauthentication       no
+kbdinteractiveauthentication no
+```
+
+Root is key-only, password login is off, and the PAM keyboard-interactive path
+is closed — without that last one some configurations still accept an
+interactive password prompt after `PasswordAuthentication no`.
+
+**These live in `/etc/ssh/sshd_config.d/00-hardening.conf`, not in the main
+config, and that placement is the point.** Ubuntu 24.04 puts
+`Include /etc/ssh/sshd_config.d/*.conf` at the *top* of `sshd_config`, and sshd
+keeps the **first** value it reads for any directive. The image ships
+`50-cloud-init.conf` containing `PasswordAuthentication yes`, which overrides
+both `60-cloudimg-settings.conf` and the main file. Editing `sshd_config`
+therefore appears to work and silently does nothing.
+
+A file named `00-` sorts ahead of cloud-init's, so it wins — and it keeps
+winning if cloud-init regenerates `50-` on a later boot. Verify after any
+reboot with:
+
+```bash
+sshd -T | grep -iE '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication) '
+```
+
+Reverting is `rm /etc/ssh/sshd_config.d/00-hardening.conf && systemctl reload ssh`.
+
+### Firewall
+
+```
+Status: active
+Default: deny (incoming), allow (outgoing), deny (routed)
+
+22/tcp    ALLOW IN    Anywhere        (+ v6)
+80/tcp    ALLOW IN    Anywhere        (+ v6)
+443/tcp   ALLOW IN    Anywhere        (+ v6)
+```
+
+80 and 443 are **required**: Hostinger runs Traefik in host network mode, so it
+binds the host's interfaces directly and its traffic passes through the INPUT
+chain that ufw controls. Removing those rules takes your sites down.
+
+Note what ufw does *not* protect: Docker inserts its own rules ahead of ufw's,
+so a container that publishes a port is reachable regardless of ufw. That is
+not a gap here, because `docker-compose.yml` publishes nothing at all and CI
+fails the build if that changes — but it does mean ufw is not what is keeping
+the trading bot private. The absence of a port mapping is.
+
+### Trading application
+
+```
+sol-trading-bot     published ports: none
+4001 / 4002 / 8787  not listening
+.env                0600, owned by soldeploy
+```
+
+### Known remaining items
+
+- A reboot is pending from unattended-upgrades. Both Traefik and the bot use
+  `restart: unless-stopped`; the bot returns in `HALTED` because `KILL_SWITCH`
+  lives in `.env`. Re-verify the sshd settings afterwards.
+- Two Traefik volumes exist (`traefik-letsencrypt` and
+  `traefik_traefik-letsencrypt`), one likely orphaned from a compose project
+  rename. Left alone deliberately — deleting the wrong one destroys the TLS
+  certificates.
+
+---
+
 ## Incident response
 
 **Suspected unauthorised order or unexpected position**
