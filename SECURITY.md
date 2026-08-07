@@ -223,6 +223,33 @@ only the first is automated.
 
 A deployment updates application code and the container. That is all it can do.
 
+### Branch protection on `main`
+
+`main` requires a pull request and all four CI jobs, requires branches to be up
+to date before merging, and blocks force pushes and deletion. **"Do not allow
+bypassing the above settings" is enabled.**
+
+That last setting is the one that makes the rest real. Without it, repository
+administrators are exempt — and since every push to this repository is made by
+an admin, the rule merely *logs* violations and permits them:
+
+```
+remote: Bypassed rule violations for refs/heads/main:
+remote: - Changes must be made through a pull request.
+remote: - 4 of 4 required status checks are expected.
+   ea6c25f..f16898f  HEAD -> main
+```
+
+That output is from this repository, before the setting was corrected. The push
+succeeded. A protection rule nobody has watched refuse something is a settings
+page, not a control — the same reason `verify_safety.sh` exists rather than a
+comment claiming the configuration is safe.
+
+**Plan caveat:** on GitHub Free, branch protection is enforced on **public**
+repositories only. Making this repository private on the Free plan silently
+stops enforcement while continuing to display the rule. If visibility changes,
+re-verify by attempting a direct push to `main` and confirming it is rejected.
+
 ### SSH
 
 - Authentication by **deploy key only**. No password is stored in GitHub.
