@@ -564,9 +564,10 @@ class IBKRBroker(Broker):
     async def connect(self) -> ConnectionInfo:
         if not ibapi_available():
             raise BrokerConnectionError(
-                "the official IBKR TWS API (ibapi) is not installed. "
-                "Install the optional extra with `pip install -e '.[ibkr]'` after reading "
-                "docs/IBKR_API_NOTES.md. DISABLED and MOCK modes do not require it."
+                "the IBKR TWS API (ibapi) is not installed. It is deliberately not a "
+                "runtime dependency: how it gets installed is a supply-chain decision "
+                "for the component that can place orders, and docs/IBKR_API_NOTES.md "
+                "sets out the options. DISABLED and MOCK modes do not require it."
             )
         if self.is_connected():
             return self.get_connection_info()

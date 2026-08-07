@@ -3,6 +3,35 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `app/broker/checkout.py` and `app.cli ibkr-checkout` — a read-only checkout of
+  a real IB Gateway session. Every socket path in the IBKR adapter was
+  unverified: the unit tests around it drive fakes because there has never been
+  a gateway to point it at. The checkout connects once on the admin client id,
+  runs each read-only call the system depends on, and reports PASS / FAIL / SKIP
+  per probe with the evidence it saw, so a wrong answer is visible rather than
+  something an operator has to notice.
+
+  It cannot place an order. The broker is typed as a `ReadOnlyBroker` Protocol
+  with no write methods, so `mypy --strict` rejects one; it refuses to run
+  unless the interlocks are engaged and the mode is `paper`; and its final probe
+  forces every session-side condition green and requires `TransmitGate` to
+  refuse anyway. An empty report is a failure, not a pass — the distinction that
+  `verify_running.sh` got wrong before it was deleted.
+
+### Changed
+
+- `RUNBOOK.md` recommends running IB Gateway on a local machine before the VPS.
+  Whether the adapter works and whether it can run headless and unattended are
+  independent questions, and answering the first does not require solving the
+  second.
+- The "ibapi is not installed" error no longer names a specific install command.
+  Which distribution to install is the open supply-chain decision in
+  `docs/IBKR_API_NOTES.md`, and the error should not pre-empt it.
+
 ## [0.1.0] — 2026-08-07
 
 Initial infrastructure. **This release cannot place an order**, by design and by

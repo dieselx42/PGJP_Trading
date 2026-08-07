@@ -133,8 +133,21 @@ to test against. What that means concretely:
 | Contract → ibapi mapping helpers | Commission reports |
 
 Every socket path should be treated as **unverified** until the read-only
-checkout in `RUNBOOK.md` step 9 has been completed. That checkout exists
-precisely because this code has not met a real gateway.
+checkout has been run against a real gateway:
+
+```bash
+python -m app.cli ibkr-checkout [--contract-month YYYYMM]
+```
+
+It exercises the entire right-hand column above in one pass and reports
+PASS / FAIL / SKIP per probe. `RUNBOOK.md` step 7 explains what each failure
+means; `app/broker/checkout.py` explains why it cannot place an order.
+
+Note what a failure there does and does not tell you. `CONTRACT_QUALIFIES`
+raising `BrokerPermissionError` while futures permission is pending is a
+**passing** result for the thing being tested — it proves the classification
+table and the never-retry policy work — even though the probe reports FAIL.
+The probe reports what happened; you decide what it means.
 
 ---
 

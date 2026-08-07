@@ -608,7 +608,13 @@ Paper account ids start with `DU`.
 
 ### 3. Install IB Gateway
 
-On the VPS, or on a machine the VPS can reach privately. Bind it to `127.0.0.1`.
+**Run it on your own machine first, not the VPS.** Both the gateway and the bot
+on one machine means nothing crosses a network boundary, 2FA is trivial because
+there is a screen in front of you, and the headless-X and unattended-login work
+is entirely separate from the question this phase actually asks — does the
+adapter work at all. Move it to the VPS once the answer is yes.
+
+Bind it to `127.0.0.1` wherever it runs.
 
 > **Unattended operation.** IB Gateway requires an interactive login and 2FA,
 > and re-authentication on its own schedule. Running it unattended usually means
@@ -648,22 +654,62 @@ KILL_SWITCH=true               # still true
 SOL_FUTURES_PERMISSION_READY=false
 ```
 
-Restart and confirm from `app.cli status`:
-
-- `broker.connection_state` is `connected`
-- `broker.account_type` is **`paper`** — if it says `live`, stop immediately;
-  the adapter will have refused the session
-- `broker.account_id` is masked and starts with `DU`
-
-### 7. Verify the contract
+### 7. Run the read-only checkout
 
 ```bash
-docker compose exec -T sol-trading-bot python -m app.cli contract-info
+python -m app.cli ibkr-checkout
 ```
 
-Confirm against IBKR's contract search: `conId`, `localSymbol`, `multiplier`,
-`minTick`, `expiration`, `tradingHours`. **Do not trust the reference constants
-in `app/contracts/solana.py`** — they have never been checked against a live
+This is the step that converts "the adapter is written" into "the adapter
+works". It connects once on `IB_ADMIN_CLIENT_ID` — never the trading process's
+client id — runs every read-only call the system depends on, and reports
+PASS / FAIL / SKIP per probe with the evidence it saw. It exits non-zero if
+anything failed.
+
+It **cannot place an order**: the broker is typed as a Protocol with no write
+methods, and it refuses to run at all unless `ALLOW_ORDER_TRANSMIT=false`,
+`KILL_SWITCH=true`, and the mode is `paper`. Running it in the deployed `mock`
+posture returns `CHECKOUT_REFUSED` and touches no socket.
+
+What each probe tells you:
+
+| Probe | A failure means |
+|---|---|
+| `SOCKET_CONNECT` | the gateway is not listening where the process expects, or the API is not enabled |
+| `ACCOUNT_TYPE_IS_PAPER` | **stop.** The account the broker reported is not a paper account |
+| `ACCOUNT_SUMMARY` | the account-data callbacks do not complete |
+| `POSITIONS_READABLE` / `FILLS_READABLE` | reconciliation would fail on every reconnect |
+| `OPEN_ORDERS_EMPTY` | orders exist that this software did not create — investigate before continuing |
+| `CONTRACT_QUALIFIES` | see below; a permission error here is expected while futures permission is pending |
+| `MARKET_DATA` | no subscription, or you are outside CME trading hours |
+| `GATE_REFUSES_WHEN_EVERYTHING_ELSE_IS_GREEN` | **stop and engage the kill switch.** The transmit gate would allow an order |
+
+The last one is the important one. It forces every session-side condition to
+its most permissive value and requires the gate to refuse anyway, so what
+refuses is the deployed configuration rather than the accident of a
+disconnected session. It is the first point in the project's life at which that
+claim is testable against a real broker rather than a fake.
+
+`CONTRACT_QUALIFIES` is skipped, never guessed, when no expiration is known.
+Pass one for the run:
+
+```bash
+python -m app.cli ibkr-checkout --contract-month 202512
+```
+
+The flag applies to that run only and is never written back to `.env` —
+choosing an expiration is a decision you record deliberately.
+
+A `BrokerPermissionError` on this probe is the **expected** result while US
+futures permission is pending, and it is a useful result: it confirms the error
+classification works and that permission errors are marked non-retryable.
+
+### 8. Verify the contract
+
+Compare the `CONTRACT_QUALIFIES` evidence against IBKR's contract search:
+`con_id`, `local_symbol`, `multiplier`, `min_tick`, `expiration`,
+`trading_hours`. **Do not trust the reference constants in
+`app/contracts/solana.py`** — they have never been checked against a live
 session, which is why the resolver overwrites them from `contractDetails`.
 
 Set the verified expiry:
@@ -672,16 +718,7 @@ Set the verified expiry:
 DEFAULT_CONTRACT_MONTH=<verified YYYYMM>
 ```
 
-### 8. Verify market data
-
-Confirm CME market data appears and is timestamped sensibly. Then configure
-freshness — until this is non-zero, every order is refused:
-
-```ini
-MARKET_DATA_MAX_AGE_SECONDS=30
-```
-
-### 9. Read-only testing
+### 9. Read-only soak
 
 With `ALLOW_ORDER_TRANSMIT=false` and IB Gateway still in Read-Only API mode,
 run for a full session and confirm:
@@ -690,6 +727,13 @@ run for a full session and confirm:
 - market data stays fresh during liquid hours
 - no orders are created (`app.cli open-orders` stays at zero)
 - disconnect/reconnect recovers cleanly
+
+Configure freshness once market data has been observed — until this is
+non-zero, every order is refused:
+
+```ini
+MARKET_DATA_MAX_AGE_SECONDS=30
+```
 
 ### 10. Only then: controlled paper orders
 
