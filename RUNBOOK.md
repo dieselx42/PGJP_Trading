@@ -216,6 +216,7 @@ rather than advisory.
 | Stop | `docker compose down` (or `make stop`) |
 | Restart | `docker compose restart sol-trading-bot` |
 | Status | `make status` |
+| Verify the running config is approved | `make verify-running` |
 | Logs | `make logs` |
 | Container state | `docker compose ps` |
 

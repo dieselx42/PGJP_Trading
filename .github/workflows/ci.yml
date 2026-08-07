@@ -207,6 +207,21 @@ jobs:
           print("OK: the container cannot transmit an order.")
           PY
 
+      - name: Running container reports the approved posture
+        run: |
+          # Checks the configuration the process actually parsed, not the file.
+          docker exec solbot-ci python -m app.cli verify
+
+      - name: Posture check fails closed on injected drift
+        run: |
+          # A control panel or compose override could inject a value .env never
+          # saw. Prove the check catches it rather than trusting that it would.
+          if docker exec -e ALLOW_ORDER_TRANSMIT=true solbot-ci python -m app.cli verify; then
+            echo "::error::the posture check passed a container with transmission enabled"
+            exit 1
+          fi
+          echo "OK: drift is detected and reported."
+
       - name: Container survives a restart with no orders created
         run: |
           docker restart solbot-ci

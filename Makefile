@@ -158,8 +158,12 @@ cancel-all-orders: ## Cancel every working order (does NOT close positions)
 # -----------------------------------------------------------------------------
 
 .PHONY: verify-safety
-verify-safety: ## Assert the server .env is not configured for live trading
+verify-safety: ## Assert the server .env FILE is not configured for live trading
 	@bash scripts/verify_safety.sh .env
+
+.PHONY: verify-running
+verify-running: ## Assert the RUNNING container's effective config is approved
+	@$(COMPOSE) exec -T $(SERVICE) python -m app.cli verify
 
 .PHONY: audit-vps
 audit-vps: ## Print the VPS audit script (run it ON the server)
