@@ -1,0 +1,229 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[dev]'
+
+      - name: ruff check
+        run: ruff check app tests scripts
+
+      - name: ruff format
+        run: ruff format --check app tests
+
+      - name: mypy (strict)
+        run: mypy app
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[dev]'
+
+      - name: Full suite
+        run: pytest --cov=app --cov-report=term-missing
+
+      # Run the safety tests a second time on their own. If a change to the
+      # shared fixtures ever made them vacuous, this job is the one whose name
+      # tells you which guarantee broke.
+      - name: Critical trading-safety tests
+        run: pytest -m safety -v
+
+  safety-audit:
+    name: Repository safety audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No .env may be committed
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error::.env is tracked by git. Production configuration must live only on the server."
+            exit 1
+          fi
+          tracked=$(git ls-files | grep -E '^\.env($|\.)' | grep -v '^\.env\.example$' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::environment files are tracked: $tracked"
+            exit 1
+          fi
+          echo "OK: no environment files are tracked."
+
+      - name: No live-trading configuration may be committed
+        run: |
+          # .env.example is the only file that legitimately carries these keys,
+          # and every value in it must be the safe one.
+          bad=$(grep -nE '^(TRADING_MODE=live|ALLOW_ORDER_TRANSMIT=true|LIVE_TRADING_ENABLED=true|KILL_SWITCH=false)' .env.example || true)
+          if [ -n "$bad" ]; then
+            echo "::error::.env.example contains a trading-enabling value: $bad"
+            exit 1
+          fi
+          echo "OK: .env.example ships safe defaults."
+
+      - name: No broker credentials may be committed
+        run: |
+          hits=$(grep -rInE '(IB_PASSWORD|IBKR_PASSWORD|TWS_PASSWORD|IB_USERNAME)[[:space:]]*=[[:space:]]*[^[:space:]$]' \
+                   --include='*.py' --include='*.yml' --include='*.yaml' --include='*.sh' \
+                   --include='*.toml' --include='*.env*' . || true)
+          if [ -n "$hits" ]; then
+            echo "::error::possible broker credentials committed:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "OK: no broker credentials found."
+
+      - name: No IB Gateway or health ports may be published
+        run: |
+          # A `ports:` mapping in compose is what would expose 4001/4002 or the
+          # health service to the internet.
+          if grep -nE '^\s*ports:' docker-compose.yml; then
+            echo "::error::docker-compose.yml publishes ports. Nothing in this service may be published."
+            exit 1
+          fi
+          if grep -nE '(traefik|Host\(|websecure|entrypoints)' docker-compose.yml; then
+            echo "::error::docker-compose.yml references Traefik. This service must not be routed."
+            exit 1
+          fi
+          echo "OK: nothing is published and Traefik is untouched."
+
+      - name: Deployment must not be able to write .env
+        run: |
+          if grep -nE '(>|>>|tee|cp|mv|sed -i|cat).*\.env([^.]|$)' scripts/deploy.sh; then
+            echo "::error::deploy.sh appears to write .env. It must only ever read it."
+            exit 1
+          fi
+          if grep -rnE '\.env' .github/workflows/deploy.yml | grep -vE '#|verify_safety|does not|never|must not'; then
+            echo "::warning::deploy workflow mentions .env; confirm it only reads it."
+          fi
+          echo "OK: deployment does not write .env."
+
+  docker:
+    name: Docker build and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: sol-futures-trading-bot:ci
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIMESTAMP=${{ github.event.repository.updated_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image runs as a non-root user
+        run: |
+          user=$(docker image inspect sol-futures-trading-bot:ci --format '{{.Config.User}}')
+          echo "image user: $user"
+          test "$user" = "trader" || { echo "::error::image does not run as 'trader'"; exit 1; }
+
+      - name: Image contains no .env
+        run: |
+          if docker run --rm --entrypoint sh sol-futures-trading-bot:ci -c 'ls -a /app | grep -x "\.env"'; then
+            echo "::error::an .env file was baked into the image"
+            exit 1
+          fi
+          echo "OK: no .env in the image."
+
+      - name: Container starts, becomes healthy, and refuses to trade
+        run: |
+          mkdir -p ci-data ci-logs
+          sudo chown -R 10001:10001 ci-data ci-logs
+
+          docker run -d --name solbot-ci \
+            -e APP_ENV=ci \
+            -e TRADING_MODE=mock \
+            -e ALLOW_ORDER_TRANSMIT=false \
+            -e LIVE_TRADING_ENABLED=false \
+            -e KILL_SWITCH=true \
+            -e SOL_FUTURES_PERMISSION_READY=false \
+            -e DEFAULT_CONTRACT_MONTH=202612 \
+            -e MARKET_DATA_POLL_INTERVAL_SECONDS=0.5 \
+            -e LOG_FORMAT=json \
+            -v "$PWD/ci-data:/app/data" \
+            -v "$PWD/ci-logs:/app/logs" \
+            sol-futures-trading-bot:ci
+
+          for i in $(seq 1 40); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' solbot-ci 2>/dev/null || echo starting)
+            [ "$status" = "healthy" ] && break
+            sleep 3
+          done
+          docker logs solbot-ci
+          test "$status" = "healthy" || { echo "::error::container never became healthy"; exit 1; }
+
+          echo "--- status ---"
+          docker exec solbot-ci python -m app.cli status | tee status.json
+
+          python - <<'PY'
+          import json, sys
+          status = json.load(open("status.json"))
+          gate = status["safety"]["transmit_gate"]
+          assert gate["allowed"] is False, "the transmit gate allowed an order in CI"
+          assert status["safety"]["can_transmit_live_orders"] is False
+          assert "KILL_SWITCH_ENGAGED" in gate["reasons"]
+          assert "ORDER_TRANSMIT_NOT_ALLOWED" in gate["reasons"]
+          assert status["application"]["state"] == "HALTED", status["application"]["state"]
+          print("OK: the container cannot transmit an order.")
+          PY
+
+      - name: Container survives a restart with no orders created
+        run: |
+          docker restart solbot-ci
+          for i in $(seq 1 40); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' solbot-ci 2>/dev/null || echo starting)
+            [ "$status" = "healthy" ] && break
+            sleep 3
+          done
+          test "$status" = "healthy" || { echo "::error::container unhealthy after restart"; exit 1; }
+          docker exec solbot-ci python -m app.cli open-orders | tee orders.json
+          python -c "import json;d=json.load(open('orders.json'));assert d['count']==0, d;print('OK: no orders after restart.')"
+
+      - name: Database persisted outside the container
+        run: |
+          test -f ci-data/trading.db || { echo "::error::database was not persisted to the mount"; exit 1; }
+          echo "OK: database present on the host mount."
+
+      - name: Teardown
+        if: always()
+        run: docker rm -f solbot-ci || true

@@ -1,0 +1,34 @@
+# Secrets must never enter the build context, let alone the image.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Runtime state belongs on the host, not in the image.
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+
+# Development noise
+.git/
+.github/
+.venv/
+venv/
+tests/
+docs/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.idea/
+.vscode/

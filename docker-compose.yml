@@ -1,0 +1,79 @@
+# =============================================================================
+# sol-futures-trading-bot
+#
+# DELIBERATE OMISSIONS -- do not "fix" these:
+#
+#   * No `ports:` mapping. Nothing about this service should be reachable from
+#     outside the host. The health service is loopback-inside-the-container and
+#     the Docker healthcheck runs inside the container to reach it.
+#
+#   * No Traefik labels. The Hostinger Traefik installation is left entirely
+#     alone; this service is not routed through it and does not need to be.
+#
+#   * No IB Gateway ports (4001/4002) anywhere. When IB Gateway is introduced,
+#     it must be reachable only over loopback or a private, `internal: true`
+#     Docker network. See SECURITY.md.
+#
+#   * No `env_file` fallback and no inline safety variables. The server's .env
+#     is the single source of configuration and CI/CD never writes it.
+# =============================================================================
+
+services:
+  sol-trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unknown}
+    image: sol-futures-trading-bot:${IMAGE_TAG:-local}
+    container_name: sol-trading-bot
+
+    # Configuration lives only on the server, in a 0600 file.
+    env_file:
+      - .env
+
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    # Bind mounts rather than named volumes so an operator can read the log
+    # files and copy the database without entering the container. Ownership is
+    # set by scripts/bootstrap_dirs.sh (uid/gid 10001, matching the image).
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+    # The application writes only to /app/data and /app/logs, both of which are
+    # mounts, so the rest of the filesystem can be read-only.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    # An explicit, project-scoped bridge network. Nothing else joins it, and it
+    # publishes nothing. Named so it is obvious in `docker network ls` that it
+    # belongs to this project and not to Traefik.
+    networks:
+      - sol-trading-internal
+
+networks:
+  sol-trading-internal:
+    name: sol-trading-internal
+    driver: bridge

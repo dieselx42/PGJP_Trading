@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Safety verification for a server .env.
+#
+#     bash scripts/verify_safety.sh /opt/sol-futures-trading-bot/.env
+#
+# Exits non-zero if the file is configured in a way this phase does not permit.
+# It is run by `make run` and by the deploy script BEFORE the container starts,
+# so a bad configuration is caught before it can do anything.
+#
+# This script only READS the file. It never writes one, which is the whole point
+# of keeping .env off CI/CD entirely.
+# =============================================================================
+
+set -uo pipefail
+
+ENV_FILE="${1:-.env}"
+FAILURES=0
+WARNINGS=0
+
+fail() { printf '  [FAIL] %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
+warn() { printf '  [WARN] %s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
+pass() { printf '  [ ok ] %s\n' "$1"; }
+
+# Read a variable without sourcing the file (sourcing an untrusted .env would
+# execute whatever is in it).
+value_of() {
+    grep -E "^[[:space:]]*$1[[:space:]]*=" "$ENV_FILE" 2>/dev/null \
+        | tail -1 \
+        | sed -E "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//" \
+        | sed -E 's/[[:space:]]*(#.*)?$//' \
+        | tr -d '"'"'"
+}
+
+expect() {
+    local name="$1" want="$2" got
+    got="$(value_of "$name")"
+    if [ -z "$got" ]; then
+        fail "$name is not set (expected '$want')"
+    elif [ "$got" != "$want" ]; then
+        fail "$name='$got' (expected '$want')"
+    else
+        pass "$name=$got"
+    fi
+}
+
+echo "Verifying trading safety configuration in: $ENV_FILE"
+echo
+
+if [ ! -f "$ENV_FILE" ]; then
+    echo "  [FAIL] $ENV_FILE does not exist."
+    echo
+    echo "  Create it on the server from .env.example and chmod 600 it."
+    echo "  CI/CD must never create this file."
+    exit 1
+fi
+
+# -----------------------------------------------------------------------------
+echo "Interlocks:"
+expect TRADING_MODE                 mock
+expect ALLOW_ORDER_TRANSMIT         false
+expect LIVE_TRADING_ENABLED         false
+expect KILL_SWITCH                  true
+expect SOL_FUTURES_PERMISSION_READY false
+
+echo
+echo "Risk limits (0 = not configured = trading not authorised):"
+for var in MAX_POSITION_CONTRACTS MAX_ORDER_SIZE MAX_DAILY_LOSS_USD \
+           MAX_ORDERS_PER_HOUR MAX_OPEN_ORDERS MAX_NOTIONAL_EXPOSURE_USD; do
+    expect "$var" 0
+done
+
+echo
+echo "File permissions:"
+if [ "$(uname)" = "Darwin" ]; then
+    perms=$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null)
+else
+    perms=$(stat -c '%a' "$ENV_FILE" 2>/dev/null)
+fi
+if [ "$perms" = "600" ]; then
+    pass "$ENV_FILE is 0600"
+else
+    warn "$ENV_FILE is $perms; run: chmod 600 $ENV_FILE"
+fi
+
+echo
+echo "Credentials that must NOT be present:"
+if grep -qiE '^[[:space:]]*(IB_USERNAME|IB_PASSWORD|IBKR_USER|IBKR_PASSWORD|TWS_PASSWORD)[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
+    fail "IBKR credentials found in $ENV_FILE -- IB Gateway owns authentication, remove them"
+else
+    pass "no IBKR credentials present"
+fi
+
+echo
+echo "Repository hygiene:"
+if git -C "$(dirname "$0")/.." ls-files --error-unmatch .env >/dev/null 2>&1; then
+    fail ".env is tracked by git -- remove it from the index immediately"
+else
+    pass ".env is not tracked by git"
+fi
+
+# -----------------------------------------------------------------------------
+echo
+echo "----------------------------------------------------------------"
+if [ "$FAILURES" -gt 0 ]; then
+    echo "RESULT: $FAILURES failure(s), $WARNINGS warning(s)."
+    echo "This configuration is NOT the approved state for this phase."
+    exit 1
+fi
+echo "RESULT: safe. $WARNINGS warning(s)."
+echo "Live orders cannot be transmitted with this configuration."
+exit 0

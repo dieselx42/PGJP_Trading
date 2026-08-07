@@ -1,0 +1,123 @@
+name: Deploy
+
+# MANUAL ONLY, on purpose.
+#
+# There is no `push` trigger. A git push must not be able to reach the trading
+# server on its own -- deployment is a decision a human makes, and this is where
+# that decision is recorded.
+#
+# The deploy itself updates code and the container. It cannot change trading
+# safety configuration: the server .env is never written by CI/CD, and
+# scripts/verify_safety.sh runs on the server before the container starts.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to deploy"
+        required: true
+        default: "main"
+      confirm:
+        description: 'Type "deploy" to confirm'
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Confirm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the confirmation string
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
+            echo "::error::confirmation not given; type 'deploy' to proceed"
+            exit 1
+          fi
+
+  ci:
+    name: Re-run CI on the target ref
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Deploy to srv1792440.hstgr.cloud
+    needs: [guard, ci]
+    runs-on: ubuntu-latest
+    # Add a required reviewer to this environment in GitHub settings for a
+    # second pair of eyes on every production deploy.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Verify the required secrets exist
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          missing=""
+          [ -n "$DEPLOY_HOST" ]        || missing="$missing DEPLOY_HOST"
+          [ -n "$DEPLOY_USER" ]        || missing="$missing DEPLOY_USER"
+          [ -n "$DEPLOY_SSH_KEY" ]     || missing="$missing DEPLOY_SSH_KEY"
+          [ -n "$DEPLOY_KNOWN_HOSTS" ] || missing="$missing DEPLOY_KNOWN_HOSTS"
+          if [ -n "$missing" ]; then
+            echo "::error::missing repository secrets:$missing (see RUNBOOK.md)"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned host key rather than StrictHostKeyChecking=no: accepting any
+          # key would make this deploy trivially interceptable.
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          APP_DIR: ${{ secrets.DEPLOY_APP_DIR }}
+          REF: ${{ github.event.inputs.ref }}
+        run: |
+          PORT="${DEPLOY_PORT:-22}"
+          DIR="${APP_DIR:-/opt/sol-futures-trading-bot}"
+          # The remote script is the source of truth for what a deploy does.
+          # This step only invokes it; it passes no configuration and no secrets.
+          ssh -i ~/.ssh/deploy_key -p "$PORT" \
+              -o IdentitiesOnly=yes \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "APP_DIR='$DIR' bash '$DIR/scripts/deploy.sh' '$REF'"
+
+      - name: Post-deploy safety check
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          APP_DIR: ${{ secrets.DEPLOY_APP_DIR }}
+        run: |
+          PORT="${DEPLOY_PORT:-22}"
+          DIR="${APP_DIR:-/opt/sol-futures-trading-bot}"
+          ssh -i ~/.ssh/deploy_key -p "$PORT" -o IdentitiesOnly=yes \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "cd '$DIR' && bash scripts/verify_safety.sh .env"
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
