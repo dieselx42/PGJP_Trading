@@ -569,3 +569,33 @@ def test_notional_limit_blocks_an_oversized_position(contract) -> None:
     )
     assert not decision.approved
     assert "MAX_NOTIONAL_EXPOSURE_USD_EXCEEDED" in decision.reasons
+
+
+@pytest.mark.safety
+def test_11_delayed_market_data_is_refused_however_fresh_it_looks() -> None:
+    """A delayed tick is not a price an automated system may act on.
+
+    IBKR serves delayed prices in the *same* tick fields as real-time ones
+    (types 66/67/68 versus 1/2/4), so an unsubscribed or lapsed account produces
+    data that is indistinguishable downstream and looks perfectly fresh -- the
+    tick genuinely did arrive a second ago; the quote in it is fifteen minutes
+    old. Observed against a real gateway: code 354 on MSLQ6, "Delayed market
+    data is available".
+
+    There is deliberately no configuration that permits this.
+    """
+    config = Config.from_env(permissive_env(MARKET_DATA_MAX_AGE_SECONDS="30"))
+    context = all_green_gate_context(market_data_is_delayed=True, market_data_age_seconds=0.5)
+
+    decision = TransmitGate(config).evaluate(context)
+
+    assert decision.allowed is False
+    assert "MARKET_DATA_IS_DELAYED" in decision.reasons
+
+
+@pytest.mark.safety
+def test_11_a_caller_that_does_not_know_is_treated_as_delayed() -> None:
+    """The default is the refusing one, as with every other field on GateContext."""
+    from app.safety.gate import GateContext
+
+    assert GateContext().market_data_is_delayed is True

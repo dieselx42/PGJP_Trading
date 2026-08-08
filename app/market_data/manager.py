@@ -156,6 +156,7 @@ class MarketDataManager:
             last=tick.last,
             bid_size=tick.bid_size,
             ask_size=tick.ask_size,
+            is_delayed=tick.is_delayed,
         )
         if not quote.has_prices():
             # A tick with no prices tells us the feed is alive but gives us

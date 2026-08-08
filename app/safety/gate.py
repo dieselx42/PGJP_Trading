@@ -50,6 +50,7 @@ REASON_MARKET_DATA_UNAVAILABLE = "MARKET_DATA_UNAVAILABLE"
 REASON_MARKET_DATA_STALE = "MARKET_DATA_STALE"
 REASON_MARKET_DATA_TIMESTAMP_IN_FUTURE = "MARKET_DATA_TIMESTAMP_IN_FUTURE"
 REASON_MARKET_DATA_AGE_NOT_CONFIGURED = "MARKET_DATA_MAX_AGE_NOT_CONFIGURED"
+REASON_MARKET_DATA_DELAYED = "MARKET_DATA_IS_DELAYED"
 REASON_PERMISSION_CONFIG_NOT_READY = "SOL_FUTURES_PERMISSION_NOT_CONFIGURED_READY"
 REASON_PERMISSION_BROKER_NOT_READY = "TRADING_PERMISSION_UNAVAILABLE_AT_BROKER"
 REASON_STRATEGY_DISABLED = "STRATEGY_DISABLED"
@@ -80,6 +81,13 @@ class GateContext:
     #: ``None`` means "no market data at all", which is not the same as stale
     #: and gets its own rejection reason.
     market_data_age_seconds: float | None = None
+
+    #: Whether the last tick was DELAYED rather than real-time. Defaults to
+    #: True -- the unsafe answer -- because a caller that does not know cannot
+    #: be assumed to have live data. There is deliberately no configuration to
+    #: permit trading on delayed prices: a fifteen-minute-old quote is not a
+    #: price, and an automated system cannot tell the difference by looking.
+    market_data_is_delayed: bool = True
 
     #: Broker-reported trading permission for the instrument. In mock mode this
     #: is the MockBroker's simulated permission; in paper/live it reflects what
@@ -199,6 +207,14 @@ class TransmitGate:
         if max_age <= 0:
             # Unconfigured means "trading not authorised", not "no limit".
             reasons.append(REASON_MARKET_DATA_AGE_NOT_CONFIGURED)
+
+        if context.market_data_is_delayed:
+            # IBKR serves delayed ticks in the same fields as real-time ones,
+            # so an unsubscribed or lapsed account looks identical to a healthy
+            # one downstream. Observed: code 354 on MSLQ6, "Delayed market data
+            # is available". Accepting that offer silently is how a bot ends up
+            # pricing orders off quotes from a quarter of an hour ago.
+            reasons.append(REASON_MARKET_DATA_DELAYED)
 
         age = context.market_data_age_seconds
         if age is None:

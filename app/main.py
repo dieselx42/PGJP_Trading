@@ -551,6 +551,11 @@ class TradingApplication:
             if market_data is not None and contract is not None
             else None
         )
+        quote = (
+            market_data.latest(contract.key())
+            if market_data is not None and contract is not None
+            else None
+        )
         return GateContext(
             app_state=self.state,
             connection_state=self._connection_state(),
@@ -561,6 +566,10 @@ class TradingApplication:
             positions_reconciled=self.reconciliation.positions_reconciled,
             open_orders_reconciled=self.reconciliation.orders_reconciled,
             market_data_age_seconds=age,
+            # No quote at all is treated as delayed, which is redundant with
+            # MARKET_DATA_UNAVAILABLE but keeps the unsafe answer the default
+            # on every path rather than only on the ones we thought of.
+            market_data_is_delayed=quote.is_delayed if quote is not None else True,
             broker_permission_ready=self._broker_permission_ready(),
             strategy_enabled=self.strategy.enabled if self.strategy else False,
             risk_approved=risk_approved,

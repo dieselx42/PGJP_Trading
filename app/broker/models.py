@@ -242,6 +242,13 @@ class MarketDataTick:
     bid_size: int | None = None
     ask_size: int | None = None
 
+    #: True when the broker served DELAYED prices rather than real-time ones.
+    #: Delayed ticks carry the same fields as live ones, so this flag is the
+    #: only thing distinguishing them -- and the transmit gate refuses to trade
+    #: on a tick that has it set. Defaults False because mock and simulated
+    #: sources are never delayed; the IBKR adapter sets it from the tick type.
+    is_delayed: bool = False
+
     @property
     def mid(self) -> Decimal | None:
         if self.bid is not None and self.ask is not None:
@@ -256,6 +263,7 @@ class MarketDataTick:
             "bid": _opt_str(self.bid),
             "ask": _opt_str(self.ask),
             "last": _opt_str(self.last),
+            "is_delayed": self.is_delayed,
         }
 
 

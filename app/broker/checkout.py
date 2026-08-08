@@ -595,6 +595,7 @@ def _gate_probe(config: Config) -> Probe:
         positions_reconciled=True,
         open_orders_reconciled=True,
         market_data_age_seconds=0.0,
+        market_data_is_delayed=False,
         broker_permission_ready=True,
         strategy_enabled=True,
         risk_approved=True,

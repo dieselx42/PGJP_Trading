@@ -238,6 +238,8 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         self.order_statuses: dict[str, BrokerOrderSnapshot] = {}
         self.ticks: dict[int, dict[str, Decimal]] = {}
         self.tick_request_contract: dict[int, str] = {}
+        #: Request ids that have received at least one delayed tick.
+        self.delayed_requests: set[int] = set()
         self.commissions: dict[str, tuple[Decimal, str]] = {}
         #: The most recent error IBKR reported without attributing it to a
         #: request id. See :meth:`unattributed_error_since` for why.
@@ -520,6 +522,12 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         field_name = _TICK_PRICE_FIELDS.get(tickType)
         if field_name is None:
             return
+        if tickType in _DELAYED_TICK_TYPES:
+            # Recorded, never hidden. Delayed ticks carry the same field names
+            # as real-time ones, so without this the two are indistinguishable
+            # downstream and the system would price orders off data that is
+            # fifteen minutes old.
+            self.delayed_requests.add(reqId)
         self.ticks.setdefault(reqId, {})[field_name] = _to_decimal(price)
         self.last_message_at = utc_now()
 
@@ -535,6 +543,11 @@ _TICK_PRICE_FIELDS: Final[dict[int, str]] = {
     67: "ask",  # delayed ask
     68: "last",  # delayed last
 }
+
+#: IBKR's delayed equivalents of bid/ask/last. They are accepted -- refusing to
+#: parse them would only make the delay invisible -- but every tick built from
+#: one is flagged, and the transmit gate refuses to trade on a flagged tick.
+_DELAYED_TICK_TYPES: Final[frozenset[int]] = frozenset({66, 67, 68})
 
 #: IBKR order status strings mapped onto our vocabulary.
 IB_STATUS_MAP: Final[dict[str, OrderStatus]] = {
@@ -994,6 +1007,7 @@ class IBKRBroker(Broker):
             bid=values.get("bid"),
             ask=values.get("ask"),
             last=values.get("last"),
+            is_delayed=request_id in session.delayed_requests,
         )
 
     async def cancel_market_data(self, contract: QualifiedContract) -> None:
