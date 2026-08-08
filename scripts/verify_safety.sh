@@ -126,11 +126,45 @@ else
 fi
 
 echo
-echo "Credentials that must NOT be present:"
-if grep -qiE '^[[:space:]]*(IB_USERNAME|IB_PASSWORD|IBKR_USER|IBKR_PASSWORD|TWS_PASSWORD)[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
-    fail "IBKR credentials found in $ENV_FILE -- IB Gateway owns authentication, remove them"
+echo "Credentials that must NOT be in the BOT's environment:"
+# The gateway container needs IBKR credentials (see SECURITY.md, "Decision:
+# IBC"). The bot still does not, and this check is what keeps that true: the
+# bot has no field to receive them and no code path that would use one, so a
+# credential here is either a mistake or a misunderstanding of the split.
+if grep -qiE '^[[:space:]]*(IB_USERNAME|IB_PASSWORD|IBKR_USER|IBKR_PASSWORD|TWS_USERID|TWS_PASSWORD)[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
+    fail "IBKR credentials found in $ENV_FILE -- they belong in .env.ibgateway, which only the gateway service reads"
 else
-    pass "no IBKR credentials present"
+    pass "no IBKR credentials in the bot's environment"
+fi
+
+echo
+echo "IB Gateway credential file:"
+GATEWAY_ENV="$(dirname "$ENV_FILE")/.env.ibgateway"
+if [ ! -f "$GATEWAY_ENV" ]; then
+    warn "$GATEWAY_ENV does not exist; the gateway service will not start"
+else
+    if [ "$(uname)" = "Darwin" ]; then
+        gw_perms=$(stat -f '%Lp' "$GATEWAY_ENV" 2>/dev/null)
+    else
+        gw_perms=$(stat -c '%a' "$GATEWAY_ENV" 2>/dev/null)
+    fi
+    if [ "$gw_perms" = "600" ]; then
+        pass "$GATEWAY_ENV is 0600"
+    else
+        # This file holds a brokerage password. Loose permissions are a
+        # failure, not a warning -- unlike the bot's .env, which holds none.
+        fail "$GATEWAY_ENV is $gw_perms and holds an IBKR password; run: chmod 600 $GATEWAY_ENV"
+    fi
+
+    if grep -qE '^[[:space:]]*TWS_PASSWORD[[:space:]]*=[[:space:]]*$' "$GATEWAY_ENV" 2>/dev/null; then
+        warn "TWS_PASSWORD is empty in $GATEWAY_ENV; the gateway cannot log in"
+    fi
+
+    if git -C "$(dirname "$0")/.." ls-files --error-unmatch .env.ibgateway >/dev/null 2>&1; then
+        fail ".env.ibgateway is tracked by git -- it holds an IBKR password; remove it from the index and rotate the credential at IBKR"
+    else
+        pass ".env.ibgateway is not tracked by git"
+    fi
 fi
 
 echo

@@ -10,9 +10,11 @@
 #   * No Traefik labels. The Hostinger Traefik installation is left entirely
 #     alone; this service is not routed through it and does not need to be.
 #
-#   * No IB Gateway ports (4001/4002) anywhere. When IB Gateway is introduced,
-#     it must be reachable only over loopback or a private, `internal: true`
-#     Docker network. See SECURITY.md.
+#   * No IB Gateway API ports published to the host. The gateway runs as a
+#     service on this project's private bridge and the bot reaches it by
+#     service name, so 4001-4004 never touch a host interface at all -- a
+#     property of the topology rather than a firewall rule that has to stay
+#     correct. Only VNC is published, and only to 127.0.0.1.
 #
 #   * No `env_file` fallback and no inline safety variables. The server's .env
 #     is the single source of configuration and CI/CD never writes it.
@@ -72,6 +74,65 @@ services:
     # belongs to this project and not to Traefik.
     networks:
       - sol-trading-internal
+
+    depends_on:
+      - ib-gateway
+
+  # ---------------------------------------------------------------------------
+  # IB Gateway
+  #
+  # THIS SERVICE HOLDS A BROKERAGE CREDENTIAL. The bot does not, and must not:
+  # `env_file` here is `.env.ibgateway` and nothing else, while the bot keeps
+  # its own `.env` which `scripts/verify_safety.sh` still fails the deployment
+  # over if a credential-shaped variable appears in it.
+  #
+  # The image embeds IBC. That reverses the original brief's prohibition, on an
+  # explicit operator decision recorded in SECURITY.md -- read that before
+  # changing anything here.
+  #
+  # Pinned to a digest rather than `:stable`, because a floating tag on the one
+  # container that holds an IBKR password is an unreviewed change waiting to
+  # happen. Update it deliberately.
+  # ---------------------------------------------------------------------------
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: sol-ib-gateway
+
+    env_file:
+      - .env.ibgateway
+
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    # NO API PORT MAPPING. The bot is on the same private network and reaches
+    # this container as `ib-gateway:4004` (paper) -- 4001-4004 are never bound
+    # to a host interface, so there is nothing for a firewall rule to protect.
+    #
+    # VNC is published to loopback only, for manual intervention over an SSH
+    # tunnel. Delete this line if you never need it.
+    ports:
+      - "127.0.0.1:5900:5900"
+
+    # Gateway settings, saved API configuration and IBC state. Without this the
+    # gateway re-downloads and re-configures itself on every recreate.
+    volumes:
+      - ib-gateway-settings:/home/ibgateway/Jts
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    networks:
+      - sol-trading-internal
+
+volumes:
+  ib-gateway-settings:
+    name: sol-ib-gateway-settings
 
 networks:
   sol-trading-internal:

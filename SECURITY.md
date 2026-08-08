@@ -19,14 +19,56 @@ Everything below exists to address one of those four.
 
 ### What this system holds
 
-**No broker credentials, ever.** There is no IBKR username, password, or 2FA
-material anywhere in this repository, in the image, in the database, or in the
-configuration schema. IB Gateway owns authentication, and nothing here attempts
-to bypass, automate, or work around it.
+**The trading bot holds no broker credentials.** There is no IBKR username,
+password, or 2FA material anywhere in this repository, in the bot's image, in the
+database, or in the bot's configuration schema. The bot reaches an
+already-authenticated gateway with a host, a port and a client id — none of which
+are secret.
 
-`scripts/verify_safety.sh` fails if a server `.env` contains `IB_USERNAME`,
-`IB_PASSWORD`, `IBKR_PASSWORD`, or `TWS_PASSWORD`, and CI greps the whole tree
-for the same.
+`scripts/verify_safety.sh` fails if the bot's `.env` contains `IB_USERNAME`,
+`IB_PASSWORD`, `IBKR_PASSWORD`, `TWS_USERID` or `TWS_PASSWORD`, and CI greps the
+whole tree for the same.
+
+### Decision: IBC, and where the credential now lives
+
+The original brief forbade storing IBKR credentials anywhere and forbade
+installing IBC or equivalent login automation without explicit approval. That was
+implemented as a host-installed IB Gateway with a manual login over an
+SSH-tunnelled VNC session — no credential stored anywhere, at the cost of a human
+login after every reboot and every IBKR re-authentication.
+
+**On 2026-08-08 the operator reversed that decision** in favour of the
+containerised `ghcr.io/gnzsnz/ib-gateway` image, which embeds IBC and requires
+`TWS_USERID` and `TWS_PASSWORD` in its environment. Recorded here rather than
+left as a contradiction between the documentation and the running system.
+
+What that buys, and it is not nothing:
+
+- **Unattended operation.** The gateway authenticates itself after a reboot.
+- **A stronger port guarantee.** The API port is never published to the host at
+  all; the bot reaches the gateway by service name on a private Docker network.
+  The host-installed gateway listened on `*:4002` and depended on ufw.
+- **Persistent settings** in a named volume rather than a home directory.
+
+What it costs, stated plainly:
+
+- The IBKR password sits in a file on the server, readable by root.
+- A third-party image sits in the authentication path of a brokerage account.
+- Anyone with root on the VPS can obtain the credential.
+
+**What did not change:** the *trading bot* still holds no credential. The gateway
+gets its own `.env.ibgateway`, referenced only by the gateway service; the bot's
+`.env` is still checked for credential-shaped variables and still fails the
+deployment if any appear. The bot has no field to receive them and no code path
+that would use one.
+
+Consequences to accept deliberately:
+
+- Treat the VPS as holding a brokerage credential. Root on that box is now
+  equivalent to the IBKR password.
+- Use a **paper** credential until live trading is a separate, explicit decision.
+- Rotate at IBKR if the server is ever suspected compromised — the credential is
+  no longer only in your head.
 
 ### Where configuration lives
 

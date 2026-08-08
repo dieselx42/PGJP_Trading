@@ -1,4 +1,14 @@
-# Running IB Gateway on the Hostinger VPS
+# Running IB Gateway on the Hostinger VPS (host install)
+
+> **Superseded by [`IBKR_GATEWAY_DOCKER.md`](IBKR_GATEWAY_DOCKER.md).** The
+> gateway now runs as a compose service with IBC handling login, on an operator
+> decision recorded in `SECURITY.md`. That trades a stored IBKR password for
+> unattended operation.
+>
+> Kept because it is the only way to run this **without storing a credential**,
+> and because two findings in it apply to any IB Gateway install: the API socket
+> binds `*:4002` regardless of the localhost-only checkbox, and `pgrep -f
+> ibgateway` also matches the VNC server.
 
 Steps for installing IB Gateway on `srv1792440.hstgr.cloud`, logging into it
 interactively over an SSH-tunnelled VNC session, and pointing the bot at it.

@@ -52,6 +52,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the gate, with no setting to permit them. `GateContext.market_data_is_delayed`
   defaults to `True`, the refusing answer, like every other field on that class.
 
+- IB Gateway runs as a compose service (`ghcr.io/gnzsnz/ib-gateway`) with IBC
+  handling login, replacing the host install with its manual VNC login. This
+  reverses the original brief's prohibition on storing IBKR credentials, on an
+  explicit operator decision recorded in `SECURITY.md` rather than left as a
+  contradiction between the documentation and the running system.
+
+  The bot still holds no credential. The gateway reads `.env.ibgateway`; the
+  bot's `.env` is still checked on every deployment and still fails it if a
+  credential-shaped variable appears. What the trade buys is unattended
+  operation, persistent settings, and a stronger port guarantee — the API ports
+  are never published to a host interface, so the bot reaches the gateway across
+  a private bridge and there is nothing on the host for a firewall to protect.
+  What it costs is that root on the VPS is now equivalent to the IBKR password.
+
 ### Changed
 
 - The IBKR adapter, `docs/IBKR_API_NOTES.md` and `app/contracts/solana.py` no
