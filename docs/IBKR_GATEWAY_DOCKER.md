@@ -34,10 +34,11 @@ no VNC, no human. The manual procedure needed two starts before the login screen
 was even reachable.
 
 **A stronger port guarantee.** The API ports are never published to a host
-interface. The bot reaches `ib-gateway:4004` across the private bridge, so
-there is nothing on the host for a firewall rule to protect. The host-installed
-gateway listened on `*:4002` and depended entirely on ufw — see
-`docs/IBKR_GATEWAY_VPS.md` for why that was weaker than it looked.
+interface, and the bot reaches them over the gateway's own loopback — so there
+is nothing on the host for a firewall rule to protect, and nothing on any
+network either. The host-installed gateway listened on `*:4002` and depended
+entirely on ufw; see `docs/IBKR_GATEWAY_VPS.md` for why that was weaker than it
+looked.
 
 **Persistent settings** in a named volume, rather than a home directory that a
 reinstall would flatten.
@@ -163,11 +164,11 @@ ss -tlpn | grep -E ':400[1-4]' || echo "no gateway API port on the host - correc
 
 Anything found here means a `ports:` mapping crept into the compose file.
 
-**Connectivity, from the bot's own network namespace:**
+**Connectivity** — the bot shares the gateway's namespace, so this is loopback:
 
 ```bash
 docker compose exec -T sol-trading-bot python -c \
-  "import socket; s=socket.create_connection(('ib-gateway',4004),5); print('reachable'); s.close()"
+  "import socket; s=socket.create_connection(('127.0.0.1',4002),5); print('reachable'); s.close()"
 ```
 
 **The checkout** — the real proof:
@@ -214,6 +215,10 @@ docker compose exec -T sol-trading-bot python -m app.cli verify
 ```
 
 Want `APPROVED_POSTURE` 12/12 and both containers healthy.
+
+**Never restart the gateway alone.** The bot lives in its network namespace, so
+recreating `ib-gateway` on its own leaves the bot attached to a namespace that
+no longer exists. Use `docker compose up -d --force-recreate` for both.
 
 ## Two settings whose absence is silent
 
