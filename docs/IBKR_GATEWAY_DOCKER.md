@@ -90,6 +90,10 @@ READ_ONLY_API=yes
 VNC_SERVER_PASSWORD=<something other than your IBKR password>
 ```
 
+`TWS_ACCEPT_INCOMING=accept` and `EXISTING_SESSION_DETECTED_ACTION=primary` are
+already in the template and both matter — see "Two settings whose absence is
+silent" below before removing either.
+
 `chmod 600` is enforced, not advised: `scripts/verify_safety.sh` **fails the
 deployment** if this file is group- or world-readable, or if it is tracked by
 git. Unlike the bot's `.env`, loose permissions here are a failure rather than a
@@ -193,6 +197,39 @@ docker compose exec -T sol-trading-bot python -m app.cli verify
 ```
 
 Want `APPROVED_POSTURE` 12/12 and both containers healthy.
+
+## Two settings whose absence is silent
+
+IBC's `config.ini` is generated from a template with `envsubst`, so only the keys
+written as `${VAR}` can be set from the environment. Two of those decide whether
+an unattended gateway works at all, and leaving them empty fails in ways that
+look like anything but a missing setting.
+
+**`TWS_ACCEPT_INCOMING`** → `AcceptIncomingConnectionAction`. IB Gateway prompts
+before admitting an API client it does not recognise. IBC only watches for that
+dialog when this is set, so with it empty: the TCP connection is accepted, the
+API handshake never completes, the client times out waiting for managed
+accounts, and **nothing appears in the gateway log** — IBC never looked for a
+dialog it was not told to handle. Hours can go into that one, because every
+observation points at the network and the network is fine.
+
+`accept` is safe here specifically because the API port is never published: it
+exists only on the private Docker network and the bot container is the only thing
+that can reach it. Publishing 4001–4004 to the host would make this a different
+question.
+
+**`EXISTING_SESSION_DETECTED_ACTION`** → `primary`. IBKR permits one session per
+login; when another holds it, the gateway asks and IBC answers with this. Empty
+means wait for a human, which for a container means hang.
+
+Three related keys are **hardcoded empty in the template** and cannot be set from
+the environment at all — `OverrideTwsApiPort`, `TrustedTwsApiClientIPs` and
+`BindAddress`. Changing those needs `CUSTOM_CONFIG=yes` and a bind-mounted
+`config.ini`. Worth knowing before spending time trying to set them.
+
+Note also that `jts.ini` is written **only if it does not already exist**, so
+gateway-side settings persist in the volume across recreates and are not
+refreshed from the template.
 
 ## The host-installed gateway
 
