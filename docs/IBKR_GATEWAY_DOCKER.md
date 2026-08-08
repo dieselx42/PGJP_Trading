@@ -34,10 +34,11 @@ no VNC, no human. The manual procedure needed two starts before the login screen
 was even reachable.
 
 **A stronger port guarantee.** The API ports are never published to a host
-interface. The bot reaches `ib-gateway:4004` across the private bridge, so
-there is nothing on the host for a firewall rule to protect. The host-installed
-gateway listened on `*:4002` and depended entirely on ufw — see
-`docs/IBKR_GATEWAY_VPS.md` for why that was weaker than it looked.
+interface, and the bot reaches them over the gateway's own loopback — so there
+is nothing on the host for a firewall rule to protect, and nothing on any
+network either. The host-installed gateway listened on `*:4002` and depended
+entirely on ufw; see `docs/IBKR_GATEWAY_VPS.md` for why that was weaker than it
+looked.
 
 **Persistent settings** in a named volume, rather than a home directory that a
 reinstall would flatten.
@@ -90,6 +91,10 @@ READ_ONLY_API=yes
 VNC_SERVER_PASSWORD=<something other than your IBKR password>
 ```
 
+`TWS_ACCEPT_INCOMING=accept` and `EXISTING_SESSION_DETECTED_ACTION=primary` are
+already in the template and both matter — see "Two settings whose absence is
+silent" below before removing either.
+
 `chmod 600` is enforced, not advised: `scripts/verify_safety.sh` **fails the
 deployment** if this file is group- or world-readable, or if it is tracked by
 git. Unlike the bot's `.env`, loose permissions here are a failure rather than a
@@ -106,14 +111,31 @@ warning, because this one holds a password.
 In the bot's `.env`:
 
 ```ini
-IB_HOST=ib-gateway
-IB_PAPER_PORT=4004
-IB_LIVE_PORT=4003
+IB_HOST=127.0.0.1
+IB_PAPER_PORT=4002
+IB_LIVE_PORT=4001
 ```
 
-`4003`/`4004` rather than `4001`/`4002`: the image binds IB Gateway to its own
-loopback and bridges it with socat, so those are the ports another container
-sees. `4004` is paper.
+**Loopback, because the bot shares the gateway container's network namespace**
+(`network_mode: "service:ib-gateway"` in `docker-compose.yml`). This is the one
+thing that made the connection work, and it took a long evening to establish:
+
+IB Gateway admits API clients only from loopback. On a bridge network the bot
+connects from `172.16.x.x`, and the gateway **accepts the TCP connection and
+closes it without a word** — nothing in its log, no dialog, and only ibapi's
+generic `502 Couldn't connect to TWS` at the client. Unticking *"allow
+connections from localhost only"* did not fix it. Adding the bridge address to
+Trusted IPs did not fix it. Sharing the namespace so the connection genuinely
+arrives as `127.0.0.1` fixed it immediately.
+
+That also lets the gateway keep its strictest setting, which is a better place
+to land than the permissive one that did not work anyway.
+
+**Consequence worth knowing:** recreating `ib-gateway` destroys the namespace
+the bot is attached to. Recreate the gateway and restart the bot too.
+
+The image also runs `socat` bridging `4004 → 127.0.0.1:4002` for clients on a
+network. That path is unnecessary here and unused.
 
 Leave everything else alone — `TRADING_MODE=mock`, `ALLOW_ORDER_TRANSMIT=false`,
 `KILL_SWITCH=true`, all six risk limits `0`.
@@ -142,11 +164,11 @@ ss -tlpn | grep -E ':400[1-4]' || echo "no gateway API port on the host - correc
 
 Anything found here means a `ports:` mapping crept into the compose file.
 
-**Connectivity, from the bot's own network namespace:**
+**Connectivity** — the bot shares the gateway's namespace, so this is loopback:
 
 ```bash
 docker compose exec -T sol-trading-bot python -c \
-  "import socket; s=socket.create_connection(('ib-gateway',4004),5); print('reachable'); s.close()"
+  "import socket; s=socket.create_connection(('127.0.0.1',4002),5); print('reachable'); s.close()"
 ```
 
 **The checkout** — the real proof:
@@ -193,6 +215,43 @@ docker compose exec -T sol-trading-bot python -m app.cli verify
 ```
 
 Want `APPROVED_POSTURE` 12/12 and both containers healthy.
+
+**Never restart the gateway alone.** The bot lives in its network namespace, so
+recreating `ib-gateway` on its own leaves the bot attached to a namespace that
+no longer exists. Use `docker compose up -d --force-recreate` for both.
+
+## Two settings whose absence is silent
+
+IBC's `config.ini` is generated from a template with `envsubst`, so only the keys
+written as `${VAR}` can be set from the environment. Two of those decide whether
+an unattended gateway works at all, and leaving them empty fails in ways that
+look like anything but a missing setting.
+
+**`TWS_ACCEPT_INCOMING`** → `AcceptIncomingConnectionAction`. IB Gateway prompts
+before admitting an API client it does not recognise. IBC only watches for that
+dialog when this is set, so with it empty: the TCP connection is accepted, the
+API handshake never completes, the client times out waiting for managed
+accounts, and **nothing appears in the gateway log** — IBC never looked for a
+dialog it was not told to handle. Hours can go into that one, because every
+observation points at the network and the network is fine.
+
+`accept` is safe here specifically because the API port is never published: it
+exists only on the private Docker network and the bot container is the only thing
+that can reach it. Publishing 4001–4004 to the host would make this a different
+question.
+
+**`EXISTING_SESSION_DETECTED_ACTION`** → `primary`. IBKR permits one session per
+login; when another holds it, the gateway asks and IBC answers with this. Empty
+means wait for a human, which for a container means hang.
+
+Three related keys are **hardcoded empty in the template** and cannot be set from
+the environment at all — `OverrideTwsApiPort`, `TrustedTwsApiClientIPs` and
+`BindAddress`. Changing those needs `CUSTOM_CONFIG=yes` and a bind-mounted
+`config.ini`. Worth knowing before spending time trying to set them.
+
+Note also that `jts.ini` is written **only if it does not already exist**, so
+gateway-side settings persist in the volume across recreates and are not
+refreshed from the template.
 
 ## The host-installed gateway
 
