@@ -28,31 +28,53 @@ enters this repository.
 
 ---
 
-## Why the container joins the host network
+## The firewall is load-bearing. Verified, not assumed.
 
 IB Gateway's API settings offer a checkbox — *"Allow connections from localhost
-only"* — and no bind-address field. Ticked, it listens on `127.0.0.1:4002` and
-nothing else, which is a property of the socket rather than a rule that has to be
-maintained. Unticked, it listens on **every** interface, including the public
-one, and only a firewall rule stands between 4002 and the internet.
+only"* — and no bind-address field. It is natural to read that as "the socket
+binds `127.0.0.1`". **It does not.** With the box ticked, on a real install:
+
+```
+$ ss -tlpn | grep 4002
+LISTEN 0  50  *:4002  *:*  users:(("java",pid=15147,fd=72))
+```
+
+`*:4002` — every interface, public one included. The gateway accepts the TCP
+connection from anywhere and then filters at the *application* layer, refusing
+the API handshake for a peer that is not trusted. That is meaningfully weaker
+than not listening: unauthenticated Java code still parses input from anyone who
+can reach the port.
+
+So the promise "4002 is not reachable from the internet" rests entirely on ufw,
+and that is worth stating plainly rather than discovering later. Step 7 adds
+explicit `deny` rules and Step 7b proves the result from off-host.
+
+### What this means for the container
 
 A Docker container's `127.0.0.1` is its own loopback, not the host's, so a
-bridged container cannot reach a loopback-bound gateway. Resolving that means
-either unticking the box (and depending on ufw) or putting the bot in the host's
-network namespace. This document takes the second route: **the checkbox stays
-ticked** and the container joins the host netns, so `IB_HOST=127.0.0.1` means
-what it says.
+bridged container cannot reach the host's gateway on `127.0.0.1` regardless of
+any of the above. The bot therefore joins the host network namespace
+(`network_mode: host`, Step 9) so that `IB_HOST=127.0.0.1` means what it says.
 
-What that costs: the bot container no longer has its own network namespace. What
-it does not cost: `read_only`, `cap_drop: ALL`, `no-new-privileges` and the
-non-root uid are all unaffected. The bot publishes no ports and its health server
-binds loopback either way.
+An earlier draft of this document justified that choice by claiming it preserved
+a *bind-address* guarantee — 4002 physically absent from any public interface —
+which a bridged setup would have had to trade away for a firewall rule. **That
+guarantee was never available**, because IB Gateway does not bind loopback-only
+under any setting. The firewall is load-bearing either way. Host networking is
+still the right call, but for the narrower reason that it is the simplest way to
+reach a host process from the container, not because it buys a stronger
+guarantee than the alternative.
 
-There is one more thing the ufw route would have to get right. **Docker inserts
-its DNAT rules ahead of ufw's INPUT chain**, so a published container port is
-reachable from the internet even when ufw would deny it. That does not apply to a
-host process like IB Gateway, but it is the kind of subtlety that makes
-"firewall-enforced" a weaker promise than "not bound to that interface."
+What host networking costs: the bot container no longer has its own network
+namespace. What it does not cost: `read_only`, `cap_drop: ALL`,
+`no-new-privileges` and the non-root uid are unaffected. The bot publishes no
+ports and its health server binds loopback either way.
+
+One related trap, for whenever a container *does* need a published port here:
+**Docker inserts its DNAT rules ahead of ufw's INPUT chain**, so a published
+container port is reachable from the internet even when ufw would deny it. It
+does not apply to a host process like IB Gateway, but it is why this project
+treats "no `ports:` mapping" as the primary control and ufw as the backstop.
 
 ---
 
@@ -285,12 +307,19 @@ but do not lean on that as your first defence.
 
 | Setting | Value |
 |---|---|
-| Enable ActiveX and Socket Clients | ✅ on |
 | **Read-Only API** | ✅ **on** — leave it on for the whole checkout |
 | Socket port | `4002` |
-| **Allow connections from localhost only** | ✅ **on** — this is the load-bearing one |
+| **Allow connections from localhost only** | ✅ **on** (it ships this way) |
 | Trusted IPs | `127.0.0.1` |
 | Master API client ID | *blank* |
+
+*"Enable ActiveX and Socket Clients" is a TWS setting and does not appear in
+Gateway — the API is the whole point of Gateway. The status window showing
+`Interactive Brokers API Server: connected` settles it; do not go hunting.*
+
+`Allow connections from localhost only` and `Trusted IPs` are near the **bottom**
+of that pane, below `Reset API order ID sequence`. The dialog also tends to open
+partly off-screen; drag its title bar right to see the left-hand nav tree.
 
 **Configure → Settings → Lock and Exit**
 
@@ -300,23 +329,51 @@ but do not lean on that as your first defence.
 
 **File → Save Settings.**
 
-Now verify from a root shell on the VPS — this is the check that answers
-"can 4002 be reached from the internet":
+### 7a — See what the socket actually did
 
 ```bash
 ss -tlpn | grep 4002
 ```
 
-**Required:** `127.0.0.1:4002`.
-**Stop immediately** if you see `0.0.0.0:4002` or `*:4002` — the localhost-only
-box is unticked and the API is exposed to the network. Re-tick it, save, restart
-the gateway, and check again.
+**Expect `*:4002`.** Not `127.0.0.1:4002`. The localhost-only checkbox does not
+change the bind address — the gateway listens everywhere and filters peers at the
+application layer. This is the real behaviour, not a misconfiguration, and it is
+why the next two steps are mandatory rather than belt-and-braces.
 
-Belt and braces, from your Mac:
+### 7b — Deny the ports explicitly
 
 ```bash
-nc -z -w3 srv1792440.hstgr.cloud 4002 && echo "EXPOSED - STOP" || echo "not reachable, correct"
+ufw deny 4002/tcp comment 'IB Gateway API - never reachable off-host'
+ufw deny 4001/tcp comment 'IB Gateway live API - never reachable off-host'
+ufw status numbered
 ```
+
+ufw's default `deny (incoming)` already blocks these, so this changes nothing
+today. It changes what happens *later*: an implicit block is the absence of a
+rule, which someone reopens without noticing by loosening the default policy or
+adding a broad allow. An explicit `DENY IN` has to be actively removed and is
+visible in `ufw status`, where an operator will look.
+
+4001 gets a rule too, even though nothing listens on it. The moment something
+does is exactly the wrong moment to find out the firewall was never configured
+for it.
+
+### 7c — Prove it from off the machine
+
+**On your Mac** — this is the only test that means anything:
+
+```bash
+nc -z -w3 srv1792440.hstgr.cloud 4002 && echo "REACHABLE - PROBLEM" || echo "blocked - good"
+```
+
+Run this on the VPS by mistake and it resolves the hostname to `127.0.1.1`, the
+machine's own loopback, and reports `succeeded!` — which is correct, expected,
+and completely uninformative. **Check the IP in the output.** `127.0.1.1` means
+you tested the wrong thing. The public address means you tested the right one.
+
+A correct run hangs for the full 3-second timeout and then prints `blocked - good`.
+ufw drops rather than rejects, so from outside the port looks absent rather than
+closed.
 
 ---
 
