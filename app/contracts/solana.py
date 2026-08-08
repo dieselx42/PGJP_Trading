@@ -10,11 +10,16 @@ class, trading hours) is overwritten by whatever IBKR returns from
 :class:`~app.contracts.models.QualifiedContract`, which by construction comes
 from the broker.
 
-This matters because contract specifications change, and because this build has
-never been able to verify them against a live IBKR session -- US futures
-permission is still pending. Treating the constants below as authoritative would
-be exactly the kind of unverified assumption that puts an order on the wrong
-instrument.
+MSL was checked against a live IBKR paper session on 2026-08-08 and the
+constants below were correct: multiplier 25, minimum tick 0.05, trading class
+MSL, exchange CME. IBKR listed ten contracts, monthly through Jan 2027 and
+quarterly thereafter, reporting expirations as full last-trade dates
+(``20260828``) rather than months.
+
+That agreement does not promote them to authoritative. Contract specifications
+change, SOL has not been checked at all, and the whole point of overwriting them
+from ``contractDetails`` is that an order must never depend on a constant
+somebody typed. Being right once is not the same as being a source of truth.
 """
 
 from __future__ import annotations

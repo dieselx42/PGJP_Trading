@@ -45,7 +45,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   networking changes at all. The two fail in similar-looking ways and are much
   easier to diagnose apart.
 
+- `MARKET_DATA_IS_DELAYED` — a new transmit-gate interlock. IBKR serves delayed
+  quotes in the same tick fields as real-time ones, so an unsubscribed account
+  produced data that passed every freshness check while carrying prices fifteen
+  minutes old. Delayed ticks are flagged where they are parsed and refused at
+  the gate, with no setting to permit them. `GateContext.market_data_is_delayed`
+  defaults to `True`, the refusing answer, like every other field on that class.
+
 ### Changed
+
+- The IBKR adapter, `docs/IBKR_API_NOTES.md` and `app/contracts/solana.py` no
+  longer claim to be unverified. The adapter met a real gateway on 2026-08-08
+  and most of what those files warned about is now confirmed working — a stale
+  "do not trust this" is its own hazard. What remains unverified is listed
+  explicitly rather than left as a blanket caveat.
 
 - `RUNBOOK.md` recommends running IB Gateway on a local machine before the VPS.
   Whether the adapter works and whether it can run headless and unattended are

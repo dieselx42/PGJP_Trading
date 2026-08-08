@@ -15,12 +15,21 @@ modes run with no IBKR code loaded at all.
 
 Verification status
 -------------------
-**This adapter has never been executed against a real IB Gateway.** US futures
-trading permission for the account is still pending, so there was no session to
-test against. The code is written to the documented API and is exercised by
-unit tests only through its pure helpers (error classification, account-type
-determination, contract mapping). Treat every path that talks to a socket as
-unverified until the read-only checkout in ``RUNBOOK.md`` has been completed.
+Verified against a real IB Gateway paper session (2026-08-08, ibapi 10.30.1,
+server version 187) via ``app.cli ibkr-checkout``. Confirmed working: socket
+connect and handshake, ``managedAccounts``/``nextValidId`` timing, account-type
+detection from a real ``DU`` account id, account summary, positions,
+executions, and contract qualification against live ``contractDetails``. Error
+classification met three genuine IBKR errors -- 321, 200 and 354 -- and typed
+each correctly as non-retryable.
+
+Still unverified: order placement, order-status callbacks, fills and commission
+reports. Those need ``ALLOW_ORDER_TRANSMIT=true`` and IB Gateway's Read-Only API
+mode off, which is RUNBOOK step 10 and a separate decision.
+
+Note that ``reqOpenOrders`` is refused outright while Read-Only API mode is on
+(code 321, ``reqId`` -1), so ``get_open_orders`` cannot be exercised in that
+configuration.
 
 Account identity
 ----------------
