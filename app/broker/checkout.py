@@ -294,6 +294,7 @@ _POST_CONNECT_PROBES: tuple[str, ...] = (
     "OPEN_ORDERS_EMPTY",
     "FILLS_READABLE",
     "CONTRACT_QUALIFIES",
+    "CONTRACT_MONTHS_AVAILABLE",
     "MARKET_DATA",
     "GATE_REFUSES_WHEN_EVERYTHING_ELSE_IS_GREEN",
 )
@@ -400,6 +401,7 @@ async def _contract_probe(
                 evidence={"symbol": config.default_futures_symbol},
             )
         )
+        await _list_available_months(config, broker, probes)
         return None
 
     try:
@@ -425,10 +427,11 @@ async def _contract_probe(
                     "A permission error here is the expected result while US futures "
                     "permission is still pending, and confirms the error classification "
                     "works. A contract error means the symbol, exchange or expiration is "
-                    "wrong -- check them against IBKR's contract search."
+                    "wrong -- see CONTRACT_MONTHS_AVAILABLE below."
                 ),
             )
         )
+        await _list_available_months(config, broker, probes)
         return None
 
     probes.append(
@@ -457,6 +460,70 @@ async def _contract_probe(
         )
     )
     return qualified
+
+
+async def _list_available_months(
+    config: Config,
+    broker: ReadOnlyBroker,
+    probes: list[Probe],
+) -> None:
+    """Ask IBKR which contracts exist for the symbol, without naming a month.
+
+    Runs only when qualification was skipped or failed, and it is the difference
+    between two diagnoses that look identical from a single ``200: No security
+    definition``: a wrong *month* (the symbol and exchange are fine, pick from
+    the list) and a wrong *symbol or exchange* (nothing is listed at all).
+
+    This does not violate the rule that an expiration is never chosen
+    implicitly. It reports what exists; a human still picks one and records it
+    deliberately. Guessing a front month is what that rule forbids, and this is
+    the opposite of guessing.
+    """
+    undated = ContractSpec(
+        symbol=config.default_futures_symbol,
+        sec_type=SecurityType.FUTURE,
+        exchange=config.default_exchange,
+        currency=config.default_currency,
+    )
+    try:
+        matches = await broker.get_contract_details(undated)
+    except (BrokerError, ContractError) as exc:
+        probes.append(_error_probe("CONTRACT_MONTHS_AVAILABLE", exc))
+        return
+
+    if not matches:
+        probes.append(
+            Probe(
+                name="CONTRACT_MONTHS_AVAILABLE",
+                status=ProbeStatus.FAIL,
+                detail=(
+                    f"IBKR lists no {undated.symbol} futures on {undated.exchange} at all. "
+                    "The problem is the symbol or the exchange, not the expiration."
+                ),
+                evidence={
+                    "symbol": undated.symbol,
+                    "exchange": undated.exchange,
+                    "currency": undated.currency,
+                },
+            )
+        )
+        return
+
+    listed: list[dict[str, object]] = [
+        {"expiration": c.expiration, "local_symbol": c.local_symbol, "con_id": c.con_id}
+        for c in sorted(matches, key=lambda c: c.expiration)
+    ]
+    probes.append(
+        Probe(
+            name="CONTRACT_MONTHS_AVAILABLE",
+            status=ProbeStatus.PASS,
+            detail=(
+                f"IBKR lists {len(matches)} {undated.symbol} contract(s). Re-run with "
+                "--contract-month set to one of the expirations below."
+            ),
+            evidence={"count": len(matches), "contracts": listed},
+        )
+    )
 
 
 async def _market_data_probe(

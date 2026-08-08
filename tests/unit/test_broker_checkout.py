@@ -29,6 +29,7 @@ from app.broker.checkout import (
 from app.broker.models import (
     AccountSummary,
     BrokerConnectionError,
+    BrokerContractError,
     BrokerOrderSnapshot,
     BrokerPermissionError,
     ConnectionInfo,
@@ -430,3 +431,65 @@ def test_checkout_logs_go_to_stderr_with_their_structured_fields(capsys, monkeyp
     # stdout must still be nothing but the report.
     captured = capsys.readouterr()
     json.loads(captured.out)
+
+
+# ---------------------------------------------------------------------------
+# Contract discovery
+# ---------------------------------------------------------------------------
+
+
+class DiscoveryBroker(FakeBroker):
+    """A broker whose qualification fails but which lists contracts."""
+
+    def __init__(self, *, available: list[QualifiedContract] | None = None, **kw) -> None:
+        super().__init__(
+            qualify_error=BrokerContractError("IBKR 200: no security definition"), **kw
+        )
+        self._available = available if available is not None else [qualified()]
+
+    async def get_contract_details(self, spec: ContractSpec) -> list[QualifiedContract]:
+        self.calls.append("get_contract_details")
+        assert spec.last_trade_date_or_contract_month is None, (
+            "discovery must not name a month, or it cannot discover anything"
+        )
+        return self._available
+
+
+async def test_a_wrong_month_lists_the_months_that_do_exist():
+    """`200: no security definition` alone cannot distinguish month from symbol."""
+    report = await run_checkout(paper_config(), DiscoveryBroker(), contract_month="202512")
+
+    assert probe(report, "CONTRACT_QUALIFIES").status is ProbeStatus.FAIL
+    listing = probe(report, "CONTRACT_MONTHS_AVAILABLE")
+    assert listing.status is ProbeStatus.PASS
+    assert listing.evidence["contracts"] == [
+        {"expiration": "202509", "local_symbol": "MSLU5", "con_id": 712345678}
+    ]
+
+
+async def test_no_contracts_at_all_blames_the_symbol_not_the_month():
+    report = await run_checkout(
+        paper_config(), DiscoveryBroker(available=[]), contract_month="202512"
+    )
+
+    listing = probe(report, "CONTRACT_MONTHS_AVAILABLE")
+    assert listing.status is ProbeStatus.FAIL
+    assert "symbol or the exchange" in listing.detail
+
+
+async def test_omitting_the_month_still_lists_what_is_available():
+    """Running it bare should tell you what to pass, not just that you must."""
+    broker = FakeBroker()
+    report = await run_checkout(paper_config(), broker)
+
+    assert probe(report, "CONTRACT_QUALIFIES").status is ProbeStatus.SKIP
+    assert probe(report, "CONTRACT_MONTHS_AVAILABLE").status is ProbeStatus.PASS
+    assert "qualify_contract" not in broker.calls  # still never guesses one
+
+
+async def test_discovery_is_not_run_when_qualification_succeeds():
+    """It exists to diagnose a failure; on success it is noise."""
+    report = await run_checkout(paper_config(), FakeBroker(), contract_month="202509")
+
+    assert probe(report, "CONTRACT_QUALIFIES").ok
+    assert "CONTRACT_MONTHS_AVAILABLE" not in [p.name for p in report.probes]
