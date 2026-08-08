@@ -22,6 +22,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuse anyway. An empty report is a failure, not a pass — the distinction that
   `verify_running.sh` got wrong before it was deleted.
 
+- `docs/IBKR_PAPER_CHECKOUT.md` — the step-by-step for the first real gateway
+  session. It exists because "add IBKR credentials" is the obvious next thought
+  and there is no such step: the credential is typed into IB Gateway's login
+  window and never enters this repository. The guide leads with that, then
+  covers the paper account, the API lockdown, the Mac-local `.env` (whose
+  container paths are a real trap), and the one expected `POSTURE_NOT_APPROVED`
+  that would otherwise look like a fault.
+
 ### Changed
 
 - `RUNBOOK.md` recommends running IB Gateway on a local machine before the VPS.

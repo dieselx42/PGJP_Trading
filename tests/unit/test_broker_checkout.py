@@ -122,6 +122,9 @@ class FakeBroker:
 
     @property
     def account_type(self) -> AccountType:
+        # A property, exactly as on the real Broker. If this drifts, the
+        # checkout would compare a bound method against AccountType.PAPER and
+        # quietly report every session as not-paper.
         return self._account_type
 
     async def get_account_summary(self) -> AccountSummary:

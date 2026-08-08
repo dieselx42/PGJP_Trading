@@ -599,3 +599,4 @@ and what each failure means.
 | [RUNBOOK.md](RUNBOOK.md) | Every operational procedure, including recovery |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [docs/IBKR_API_NOTES.md](docs/IBKR_API_NOTES.md) | TWS API packaging problem and options |
+| [docs/IBKR_PAPER_CHECKOUT.md](docs/IBKR_PAPER_CHECKOUT.md) | Step-by-step for the first real gateway session, and where the IBKR credential goes |

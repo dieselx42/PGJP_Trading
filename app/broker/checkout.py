@@ -307,7 +307,7 @@ async def _session_probes(
 ) -> list[Probe]:
     probes: list[Probe] = []
 
-    observed_type = broker.account_type
+    observed_type: AccountType = broker.account_type
     probes.append(
         Probe(
             name="ACCOUNT_TYPE_IS_PAPER",
