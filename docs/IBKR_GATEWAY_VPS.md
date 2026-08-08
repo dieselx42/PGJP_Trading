@@ -182,6 +182,25 @@ On your Mac, in its own terminal window — leave it running:
 ssh -N -L 5901:127.0.0.1:5901 root@srv1792440.hstgr.cloud
 ```
 
+**Run this on the Mac, not on the VPS.** Run it in your SSH session by mistake
+and the VPS resolves its own hostname to `127.0.1.1`, tries to SSH to itself, and
+fails with `Permission denied (publickey)` — an error that looks like a key
+problem and is not one.
+
+`-N` means "forward the port, run no command", so success looks like nothing
+happening: no output, no prompt returning. Leave the window open; closing it
+drops the tunnel. Confirm from another Mac window with:
+
+```bash
+lsof -nP -iTCP:5901 -sTCP:LISTEN     # expect ssh listening on 127.0.0.1:5901
+```
+
+If the key has a passphrase and you would rather not retype it every reconnect:
+
+```bash
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+```
+
 Then connect with macOS's built-in Screen Sharing: **Finder → Go → Connect to
 Server** (⌘K), and enter:
 
@@ -196,13 +215,29 @@ authenticated by your SSH key.
 
 ---
 
-## Step 5 — Install IB Gateway inside that session
+## Step 5 — Install IB Gateway
 
-Run the installer *in the VNC desktop*, not over plain SSH — it is a graphical
-installer and this way it has a display.
+The installer is graphical, so it needs a display. **There is no terminal
+emulator on that desktop** — `xterm` is only a *Suggests*, so
+`--no-install-recommends` skipped it, and IceWM's "Terminal" menu entry points at
+a binary that is not there.
 
-Open a terminal inside the VNC session (IceWM: right-click the desktop →
-Terminal), then:
+Rather than install one, drive the installer from your SSH shell and let its
+window appear in VNC. That keeps a trading server free of packages it does not
+need.
+
+In the **SSH session**, one command at a time (`su -` starts a subshell, so
+pasting the block loses everything after it):
+
+```bash
+su - ibgw
+```
+
+```bash
+export DISPLAY=:1
+```
+
+Then:
 
 ```bash
 cd /opt/ibgateway
@@ -211,10 +246,15 @@ chmod +x ibgateway-stable-standalone-linux-x64.sh
 ./ibgateway-stable-standalone-linux-x64.sh
 ```
 
-Accept the default install location. Take the **stable** channel, not latest.
+The SSH session will sit there while **the installer window appears in the VNC
+desktop**. Accept the default install location. Take the **stable** channel, not
+latest.
 
 If the URL 404s, get the current one from IBKR's software page — they move it
 occasionally.
+
+Every later launch works the same way: `su - ibgw`, `export DISPLAY=:1`, run the
+binary, and interact with it in VNC.
 
 ---
 
