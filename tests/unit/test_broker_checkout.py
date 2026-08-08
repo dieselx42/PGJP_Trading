@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -385,3 +386,47 @@ def test_paper_mode_selects_the_paper_port_and_the_admin_client_id():
     assert config.ib_port == config.ibkr.paper_port
     assert config.ibkr.admin_client_id != config.ibkr.client_id
     assert config.trading_mode is TradingMode.PAPER
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics must survive to the operator
+# ---------------------------------------------------------------------------
+
+
+def test_checkout_logs_go_to_stderr_with_their_structured_fields(capsys, monkeypatch):
+    """The IB error code must reach the operator, not be swallowed.
+
+    Without configured logging, the adapter's records fall through to
+    `logging.lastResort`, which prints "ibkr error" and drops ib_code,
+    ib_message, classified_as and retryable -- everything worth knowing. And
+    they must land on stderr, or they interleave with the JSON report on stdout
+    and make it unparseable.
+    """
+    import logging
+    import sys
+
+    from app.cli import main
+
+    for key, value in {
+        "TRADING_MODE": "paper",
+        "ALLOW_ORDER_TRANSMIT": "false",
+        "KILL_SWITCH": "true",
+        "IB_HOST": "127.0.0.1",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    # No gateway is listening, so this fails at SOCKET_CONNECT -- which is the
+    # case that most needs its reason reported.
+    main(["ibkr-checkout"])
+
+    handlers = logging.getLogger().handlers
+    assert handlers, "logging was left unconfigured; records would be dropped"
+    streams = {getattr(h, "stream", None) for h in handlers}
+    assert sys.stderr in streams, "checkout logs must not share stdout with the report"
+    assert not any(isinstance(h, logging.FileHandler) for h in handlers), (
+        "the checkout must not write to the trading process's log directory"
+    )
+
+    # stdout must still be nothing but the report.
+    captured = capsys.readouterr()
+    json.loads(captured.out)

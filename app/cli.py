@@ -334,6 +334,16 @@ def cmd_ibkr_checkout(config: Config, args: argparse.Namespace) -> int:
     import asyncio  # noqa: PLC0415
 
     from app.broker.checkout import ProbeStatus, preconditions  # noqa: PLC0415
+    from app.logging_config import configure_logging  # noqa: PLC0415
+
+    # Without this, the adapter's log records fall through to logging's
+    # last-resort handler, which prints the bare message ("ibkr error") and
+    # discards every structured field -- the IB error code, the message, how it
+    # was classified, whether it is retryable. That is precisely the information
+    # a diagnostic exists to surface. Logs go to stderr so the report on stdout
+    # stays parseable; no file sink, because this is not the trading process and
+    # must not touch its log directory.
+    configure_logging(config, run_id="ibkr-checkout", log_to_file=False, stream=sys.stderr)
 
     blocking = [p for p in preconditions(config) if p.status is ProbeStatus.FAIL]
     if blocking:
