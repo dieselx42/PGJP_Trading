@@ -76,7 +76,12 @@ jobs:
             echo "::error::.env is tracked by git. Production configuration must live only on the server."
             exit 1
           fi
-          tracked=$(git ls-files | grep -E '^\.env($|\.)' | grep -v '^\.env\.example$' || true)
+          # Any *.example is a template and may be tracked; everything else
+          # matching .env* is real configuration and must not be. Matching the
+          # suffix rather than allowlisting one literal filename means adding a
+          # second template does not require editing this check -- which is how
+          # .env.ibgateway.example broke it.
+          tracked=$(git ls-files | grep -E '^\.env($|\.)' | grep -vE '\.example$' || true)
           if [ -n "$tracked" ]; then
             echo "::error::environment files are tracked: $tracked"
             exit 1
@@ -106,16 +111,18 @@ jobs:
           fi
           echo "OK: no broker credentials found."
 
-      - name: The gateway credential example must ship empty
+      - name: Credential keys in env templates must ship empty
         run: |
-          # .env.ibgateway.example is the one committed file whose real
-          # counterpart holds a brokerage password. It must ship with the
-          # values blank.
-          if grep -nE '^[[:space:]]*(TWS_USERID|TWS_PASSWORD|VNC_SERVER_PASSWORD)[[:space:]]*=[[:space:]]*.+' .env.ibgateway.example; then
-            echo "::error::.env.ibgateway.example contains a value; it must ship empty"
-            exit 1
-          fi
-          echo "OK: gateway credential example ships empty."
+          # Templates are tracked, so any credential-shaped key in one is
+          # published. Checked across every tracked .env*.example rather than a
+          # named file, so a new template is covered the day it is added.
+          for f in $(git ls-files | grep -E '^\.env.*\.example$'); do
+            if grep -nE '^[[:space:]]*(TWS_USERID|TWS_PASSWORD|VNC_SERVER_PASSWORD|IB_USERNAME|IB_PASSWORD|IBKR_PASSWORD)[[:space:]]*=[[:space:]]*.+' "$f"; then
+              echo "::error::$f ships a credential value; it must be empty"
+              exit 1
+            fi
+          done
+          echo "OK: credential keys in env templates ship empty."
 
       - name: No port may be published to a non-loopback interface
         run: |
