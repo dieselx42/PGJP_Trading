@@ -242,6 +242,9 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         #: The most recent error IBKR reported without attributing it to a
         #: request id. See :meth:`unattributed_error_since` for why.
         self._unattributed_error: tuple[datetime, int, str] | None = None
+        #: Errors attributed to a request id that had no pending future --
+        #: streaming subscriptions. See :meth:`request_error`.
+        self._request_errors: dict[int, BrokerError] = {}
 
     # -- unattributed errors ----------------------------------------------
 
@@ -300,11 +303,30 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         if pending is not None and not pending.future.done():
             pending.future.set_result(value)
 
-    def _reject(self, request_id: int, error: BaseException) -> None:
+    def _reject(self, request_id: int, error: BaseException) -> bool:
+        """Fail the pending request. Returns False when there was none.
+
+        Streaming subscriptions (market data) have no pending future to fail --
+        there is no single response to complete -- so a refusal aimed at one
+        would otherwise be dropped on the floor. The caller records those
+        instead; see :meth:`request_error`.
+        """
         with self._lock:
             pending = self._pending.pop(request_id, None)
-        if pending is not None and not pending.future.done():
+        if pending is None:
+            return False
+        if not pending.future.done():
             pending.future.set_exception(error)
+        return True
+
+    def record_request_error(self, request_id: int, error: BrokerError) -> None:
+        with self._lock:
+            self._request_errors[request_id] = error
+
+    def request_error(self, request_id: int) -> BrokerError | None:
+        """Any error IBKR reported against a request with no pending future."""
+        with self._lock:
+            return self._request_errors.get(request_id)
 
     def fail_all(self, error: BaseException) -> None:
         with self._lock:
@@ -346,7 +368,13 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
             },
         )
         if req_id is not None and req_id > 0:
-            self._reject(req_id, error_class(f"IBKR {code}: {message}"))
+            failure = error_class(f"IBKR {code}: {message}")
+            if not self._reject(req_id, failure):
+                # A streaming subscription: no future to fail, so keep it for
+                # whoever reads that subscription's data. Without this, a
+                # refused market-data request is indistinguishable from a quiet
+                # market.
+                self.record_request_error(req_id, failure)
         elif error_class is BrokerConnectionError:
             self.fail_all(BrokerConnectionError(f"IBKR {code}: {message}"))
         else:
@@ -949,6 +977,16 @@ class IBKRBroker(Broker):
             await asyncio.sleep(0.5)
 
         values = session.ticks.get(request_id, {})
+        if not values:
+            # No ticks. Distinguish "IBKR refused the subscription" from "the
+            # market is quiet" -- they are the same empty result and completely
+            # different problems. A refusal is a permission error a human has to
+            # fix at IBKR; a quiet market outside liquid hours is nothing.
+            refusal = session.request_error(request_id)
+            if refusal is not None:
+                self._market_data_requests.pop(key, None)
+                raise refusal
+
         return MarketDataTick(
             contract_key=key,
             received_at=utc_now(),

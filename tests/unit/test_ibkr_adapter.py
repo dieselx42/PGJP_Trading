@@ -225,3 +225,48 @@ class TestUnattributedErrors:
         )
         assert error_class is not None
         assert error_class.retryable is False
+
+
+class TestStreamingSubscriptionErrors:
+    """Errors aimed at a request that has no pending future.
+
+    Market data is a streaming subscription: there is no single response to
+    complete, so `_reject` finds nothing to fail and the refusal used to vanish.
+    The caller then saw an empty tick -- identical to a quiet market, and a
+    completely different problem.
+    """
+
+    def _session(self):
+        import threading
+
+        from app.broker.ibkr_broker import _IBSession
+
+        session = _IBSession.__new__(_IBSession)
+        session._lock = threading.Lock()
+        session._pending = {}
+        session._request_errors = {}
+        return session
+
+    def test_reject_reports_when_there_was_no_pending_request(self) -> None:
+        assert self._session()._reject(4242, BrokerError("boom")) is False
+
+    def test_reject_reports_when_it_did_fail_one(self) -> None:
+        from concurrent.futures import Future
+
+        from app.broker.ibkr_broker import _PendingRequest
+
+        session = self._session()
+        future: Future = Future()
+        session._pending[4242] = _PendingRequest(future=future)
+
+        assert session._reject(4242, BrokerError("boom")) is True
+        assert isinstance(future.exception(), BrokerError)
+
+    def test_a_recorded_error_is_retrievable_by_request_id(self) -> None:
+        session = self._session()
+        session.record_request_error(7, BrokerPermissionError("IBKR 354: not subscribed"))
+
+        found = session.request_error(7)
+        assert isinstance(found, BrokerPermissionError)
+        assert "354" in str(found)
+        assert session.request_error(8) is None
