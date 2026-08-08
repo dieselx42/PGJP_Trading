@@ -110,14 +110,31 @@ warning, because this one holds a password.
 In the bot's `.env`:
 
 ```ini
-IB_HOST=ib-gateway
-IB_PAPER_PORT=4004
-IB_LIVE_PORT=4003
+IB_HOST=127.0.0.1
+IB_PAPER_PORT=4002
+IB_LIVE_PORT=4001
 ```
 
-`4003`/`4004` rather than `4001`/`4002`: the image binds IB Gateway to its own
-loopback and bridges it with socat, so those are the ports another container
-sees. `4004` is paper.
+**Loopback, because the bot shares the gateway container's network namespace**
+(`network_mode: "service:ib-gateway"` in `docker-compose.yml`). This is the one
+thing that made the connection work, and it took a long evening to establish:
+
+IB Gateway admits API clients only from loopback. On a bridge network the bot
+connects from `172.16.x.x`, and the gateway **accepts the TCP connection and
+closes it without a word** — nothing in its log, no dialog, and only ibapi's
+generic `502 Couldn't connect to TWS` at the client. Unticking *"allow
+connections from localhost only"* did not fix it. Adding the bridge address to
+Trusted IPs did not fix it. Sharing the namespace so the connection genuinely
+arrives as `127.0.0.1` fixed it immediately.
+
+That also lets the gateway keep its strictest setting, which is a better place
+to land than the permissive one that did not work anyway.
+
+**Consequence worth knowing:** recreating `ib-gateway` destroys the namespace
+the bot is attached to. Recreate the gateway and restart the bot too.
+
+The image also runs `socat` bridging `4004 → 127.0.0.1:4002` for clients on a
+network. That path is unnecessary here and unused.
 
 Leave everything else alone — `TRADING_MODE=mock`, `ALLOW_ORDER_TRANSMIT=false`,
 `KILL_SWITCH=true`, all six risk limits `0`.

@@ -69,11 +69,24 @@ services:
       retries: 3
       start_period: 20s
 
-    # An explicit, project-scoped bridge network. Nothing else joins it, and it
-    # publishes nothing. Named so it is obvious in `docker network ls` that it
-    # belongs to this project and not to Traefik.
-    networks:
-      - sol-trading-internal
+    # Share the gateway container's network namespace, so IB_HOST=127.0.0.1 is
+    # REAL loopback rather than this container's own.
+    #
+    # This is not a preference. IB Gateway admits API clients only from
+    # loopback: with the bot on a bridge network it connects from 172.16.x.x,
+    # the gateway accepts the socket and closes it without a word -- no log
+    # line, no dialog, no error beyond ibapi's generic 502. Unticking "allow
+    # connections from localhost only" and adding the bridge address to Trusted
+    # IPs did NOT fix it; only arriving as 127.0.0.1 did. Verified by running
+    # the checkout inside this namespace, which connected first time.
+    #
+    # It also means the gateway can keep its strictest setting, which is a
+    # better place to end up than the permissive one that did not work anyway.
+    #
+    # Consequence to know: recreating ib-gateway destroys the namespace this
+    # container is attached to. Recreate the gateway and you must restart the
+    # bot as well -- `docker compose up -d --force-recreate` on both.
+    network_mode: "service:ib-gateway"
 
     depends_on:
       - ib-gateway
@@ -110,6 +123,9 @@ services:
     #
     # VNC is published to loopback only, for manual intervention over an SSH
     # tunnel. Delete this line if you never need it.
+    #
+    # This namespace is shared with sol-trading-bot (see its network_mode), so
+    # these mappings cover both containers. The bot still publishes nothing.
     ports:
       - "127.0.0.1:5900:5900"
 
