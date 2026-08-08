@@ -141,7 +141,15 @@ echo
 echo "IB Gateway credential file:"
 GATEWAY_ENV="$(dirname "$ENV_FILE")/.env.ibgateway"
 if [ ! -f "$GATEWAY_ENV" ]; then
-    warn "$GATEWAY_ENV does not exist; the gateway service will not start"
+    # Not a warning. docker-compose.yml references this file, so compose
+    # refuses to start ANY service without it -- including the bot, which
+    # would otherwise be running happily. Failing here stops a deployment
+    # from taking the trading process down over a missing config file.
+    fail "$GATEWAY_ENV does not exist; compose will refuse to start any service"
+    echo
+    echo "  Create it before deploying:"
+    echo "    cp .env.ibgateway.example .env.ibgateway && chmod 600 .env.ibgateway"
+    echo "    # then set TWS_USERID and TWS_PASSWORD (paper credentials)"
 else
     if [ "$(uname)" = "Darwin" ]; then
         gw_perms=$(stat -f '%Lp' "$GATEWAY_ENV" 2>/dev/null)
