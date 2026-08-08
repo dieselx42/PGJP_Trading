@@ -11,7 +11,7 @@ remains out of scope.
 | | |
 |---|---|
 | ✅ | IB Gateway runs on the VPS host, owned by a dedicated non-login user |
-| ✅ | Port 4002 binds to `127.0.0.1` and **cannot** be reached from the internet |
+| ✅ | Port 4002 is not reachable from the internet — enforced by ufw, **not** by the bind address; see below |
 | ✅ | You log in by hand, over an SSH tunnel, with a real login window |
 | ✅ | The bot connects with `IB_HOST` / port / `IB_CLIENT_ID` and nothing else |
 | ❌ | **No IBC, no login automation, no stored IBKR password** |
