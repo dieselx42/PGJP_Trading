@@ -479,18 +479,88 @@ Two things to expect after this change:
 
 ## After a reboot
 
-Nothing here survives a reboot on its own, and that is the deliberate consequence
-of not installing login automation.
+The gateway does not survive a reboot, and that is the deliberate consequence of
+not installing login automation. Everything else does.
 
-1. `vncserver :1 -localhost yes -geometry 1440x900 -depth 24` as `ibgw`
-2. SSH tunnel from your Mac, connect VNC
-3. Launch IB Gateway, log in by hand
-4. Verify `ss -tlpn | grep 4002` shows `127.0.0.1:4002`
+### What survives, verified on a real reboot (2026-08-08)
 
-Meanwhile the bot is safe without intervention: the connection fails, the state
-goes `DISCONNECTED`, the transmit gate refuses on connection state before any
-other interlock is consulted, and reconnection backs off 2s → 300s and retries at
-that capped interval indefinitely. It does not hammer IBKR and it does not exit.
+| | |
+|---|---|
+| SSH, key-only | `sshd -T` still reports `passwordauthentication no` |
+| ufw, including the 4001/4002 denies | rules persist across boot |
+| The bot container | `restart: unless-stopped` brings it back **halted**, `APPROVED_POSTURE`, with no intervention |
+| Traefik and other containers | untouched |
+| **IB Gateway** | **gone** — needs a manual login |
+| **The VNC server** | **gone** — unless the systemd unit below is installed |
+
+Check the survivors before rebuilding anything on top of them. `sshd -T` rather
+than reading the config file: this project has had a setting that looked applied
+and was being overridden by a file loaded earlier.
+
+```bash
+sshd -T | grep -E 'permitrootlogin|passwordauthentication|kbdinteractiveauthentication'
+ufw status numbered
+cd /opt/sol-futures-trading-bot && docker compose ps && \
+  docker compose exec -T sol-trading-bot python -m app.cli verify
+ss -tlpn | grep -E ':4002|:5901' || echo "gateway and VNC down - expected"
+```
+
+### Bringing the gateway back
+
+**1.** Start the display, as `ibgw` (skip if the systemd unit is installed):
+
+```bash
+su - ibgw
+```
+```bash
+vncserver :1 -localhost yes -geometry 1440x900 -depth 24
+```
+
+**2.** Tunnel from your Mac, in its own window, and leave it running:
+
+```bash
+ssh -N -L 5901:127.0.0.1:5901 root@srv1792440.hstgr.cloud
+```
+
+Then Finder → ⌘K → `vnc://localhost:5901`.
+
+**3.** Launch the gateway from the **SSH** session, not the VNC desktop — there
+is no terminal emulator installed there. Its window appears in VNC:
+
+```bash
+su - ibgw
+```
+```bash
+export DISPLAY=:1
+```
+```bash
+/opt/ibgateway/Jts/ibgateway/*/ibgateway &
+```
+
+**4.** Log in: **Paper Trading** tab, paper credentials. No 2FA.
+
+**5.** Confirm, as root:
+
+```bash
+ss -tlpn | grep 4002        # expect *:4002 -- see Step 7a for why not loopback
+ufw status | grep 4002      # expect DENY IN
+```
+
+**6.** Re-run the checkout to confirm the session is usable:
+
+```bash
+TRADING_MODE=paper IB_HOST=127.0.0.1 PYTHONPATH=/opt/ibgateway/bot-src \
+/opt/ibgateway/checkout-venv/bin/python -m app.cli ibkr-checkout --contract-month YYYYMMDD
+```
+
+### Meanwhile the bot is safe without you
+
+The connection fails, the state goes `DISCONNECTED`, and the transmit gate
+refuses on connection state before any other interlock is consulted. Reconnection
+backs off 2s → 300s and retries at that capped interval indefinitely: it does not
+hammer IBKR and it does not exit. On reconnect it reconciles, and **if
+reconciliation fails the state becomes `SAFE` and stays there** until a human
+resolves the discrepancy.
 
 **Optional:** a systemd unit that brings the *display* up at boot, so you only
 have to tunnel in and log in rather than start the VNC server first. It starts
