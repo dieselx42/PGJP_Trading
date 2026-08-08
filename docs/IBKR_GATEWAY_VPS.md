@@ -106,13 +106,27 @@ manager, not a desktop environment.
 
 ## Step 3 — Configure VNC, bound to loopback
 
+> **Run 3a and 3b separately.** `su -` starts a new interactive shell and
+> `vncpasswd` prompts for input. Pasting them as one block means the subshell
+> swallows everything after `su` instead of running it, and you end up at an
+> `ibgw@` prompt with nothing done and no error to tell you so.
+
+**3a.** Become the gateway user, then set the VNC password when the prompt
+appears. This protects the remote *display*, not your IBKR account. Answer `n`
+to the view-only password.
+
 ```bash
 su - ibgw
+```
 
+```bash
 vncpasswd
-# Set a password. This protects the remote DISPLAY, not your IBKR account.
-# Answer "n" to the view-only password.
+```
 
+**3b.** Configure the session. Nothing here prompts, so this block is safe to
+paste whole:
+
+```bash
 mkdir -p ~/.vnc
 cat > ~/.vnc/xstartup <<'EOF'
 #!/bin/sh
@@ -122,21 +136,24 @@ EOF
 chmod +x ~/.vnc/xstartup
 ```
 
-Start it — `-localhost yes` is the part that matters:
+**3c.** Start it — `-localhost yes` is the part that matters:
 
 ```bash
 vncserver :1 -localhost yes -geometry 1440x900 -depth 24
 ```
 
-Verify from a **root** shell:
+Expect a few lines ending in `New Xtigervnc server 'srv1792440:1 (ibgw)' on port
+5901 for display :1.` Then `exit` back to root.
+
+**3d.** Verify from the **root** shell:
 
 ```bash
 ss -tlpn | grep 5901
 ```
 
-You must see `127.0.0.1:5901`. If you see `0.0.0.0:5901` or `*:5901`, kill it
-(`vncserver -kill :1`) and restart with `-localhost yes`. Do not continue until
-it is loopback-only.
+You must see `127.0.0.1:5901`. If you see `0.0.0.0:5901` or `*:5901`, the display
+is reachable from the internet — kill it (`su - ibgw -c 'vncserver -kill :1'`)
+and redo 3c with `-localhost yes`. Do not continue until it is loopback-only.
 
 ---
 
