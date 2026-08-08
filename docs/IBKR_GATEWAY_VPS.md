@@ -507,81 +507,110 @@ ss -tlpn | grep -E ':4002|:5901' || echo "gateway and VNC down - expected"
 
 ### Bringing the gateway back
 
-**1.** Start the display, as `ibgw` (skip if the systemd unit is installed):
+Both the display and the gateway run as **systemd services** (see below). After a
+reboot they start themselves and the gateway comes back sitting at its login
+window. All you do is tunnel in and log in.
 
 ```bash
-su - ibgw
-```
-```bash
-vncserver :1 -localhost yes -geometry 1440x900 -depth 24
+systemctl status vncserver@1 ibgateway --no-pager | head -20
 ```
 
-**2.** Tunnel from your Mac, in its own window, and leave it running. The reboot
-killed the old one:
+If either is down: `systemctl restart vncserver@1 ibgateway`.
+
+Then from your Mac:
 
 ```bash
-ssh -N -L 5901:127.0.0.1:5901 root@srv1792440.hstgr.cloud
+ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
+    -L 5901:127.0.0.1:5901 root@srv1792440.hstgr.cloud
 ```
-
-Check it before opening Screen Sharing, because the failure mode is confusing:
 
 ```bash
 lsof -nP -iTCP:5901 -sTCP:LISTEN     # expect ssh on 127.0.0.1:5901
 ```
 
-With no tunnel, macOS reports *"Connection failed to localhost — make sure Screen
-Sharing or Remote Management is enabled on the remote computer"*, which points
-you at System Settings on the wrong machine entirely. Nothing is listening
-locally; that is all it means.
+Finder → ⌘K → `vnc://localhost:5901`, then log in: **Paper Trading** tab, the
+**paper** username (the one beginning `D`, not your live/master username), no 2FA.
 
-Then Finder → ⌘K → `vnc://localhost:5901`.
-
-**3.** Launch the gateway from the **SSH** session, not the VNC desktop — there
-is no terminal emulator installed there. Its window appears in VNC.
-
-`su - ibgw` only if you are root; from an `ibgw` shell it prompts for a password
-that does not exist, because the account is deliberately locked.
+Confirm, as root:
 
 ```bash
-export DISPLAY=:1
+ss -tlpn | grep 4002                       # expect *:4002 -- see 7a for why
+pgrep -u ibgw -f ibgateway | wc -l         # expect exactly 1
 ```
+
+**Exactly one.** Two gateway instances fight over the same login: the second
+knocks out the first and bounces you back to the login screen after what looks
+like a successful sign-in. Same reason not to open Client Portal or the IBKR
+mobile app against this account while the gateway is up — that is error 10197,
+classified non-retryable so the bot never joins the fight.
+
+### Why systemd, and not a background job
+
+The first version of this procedure said to launch the gateway with `&`. It died
+twice in one evening.
+
+A plain `&` leaves the process attached to your SSH session's terminal, so it
+takes `SIGHUP` when the session drops. `setsid` fixes that — and it still died,
+along with the VNC server, because **`setsid` escapes a controlling terminal but
+not a systemd session cgroup**. When the login session ends, everything in its
+scope goes with it.
+
+A process holding a brokerage session for days cannot live inside a login
+session. These units put both in `/system.slice`, independent of anyone being
+logged in, and start them at boot:
+
+```ini
+# /etc/systemd/system/vncserver@.service
+[Unit]
+Description=TigerVNC display for IB Gateway login (display only)
+After=network.target
+
+[Service]
+Type=forking
+User=ibgw
+ExecStartPre=-/usr/bin/vncserver -kill :%i
+ExecStart=/usr/bin/vncserver :%i -localhost yes -geometry 1440x900 -depth 24
+ExecStop=/usr/bin/vncserver -kill :%i
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/ibgateway.service
+[Unit]
+Description=IB Gateway (process only -- login is manual, over VNC)
+After=vncserver@1.service
+Requires=vncserver@1.service
+
+[Service]
+Type=simple
+User=ibgw
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=/opt/ibgateway/.Xauthority
+ExecStart=/bin/sh -c 'exec /opt/ibgateway/Jts/ibgateway/*/ibgateway'
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ```bash
-setsid nohup /opt/ibgateway/Jts/ibgateway/*/ibgateway > /tmp/ibgw.log 2>&1 < /dev/null &
+systemctl daemon-reload
+systemctl enable --now vncserver@1 ibgateway
 ```
 
-**`setsid` is not optional.** A plain `&` leaves the gateway attached to your SSH
-session's terminal, so it takes `SIGHUP` and dies the moment that session drops —
-a sleeping laptop, a flaky link, a closed lid. Observed: launched with `&`, gone
-minutes later, with no error anywhere because its output died with the terminal.
-A process that must hold a brokerage session for days cannot depend on your SSH
-connection staying up. `setsid` gives it its own session with no controlling
-terminal; the redirect keeps its output somewhere that survives.
+**These start processes. They do not log in.** No IBKR credential appears in
+either unit, nothing is stored on disk, and the login window still waits for a
+human. That boundary is the whole point: automating the *process* is operations,
+automating the *authentication* is the IBC decision, and only the first is done
+here.
 
-Confirm it is actually running before looking for its window — a silent
-disappearance is the failure mode here:
-
-```bash
-sleep 30
-tail -40 /tmp/ibgw.log; echo "--- alive? ---"; pgrep -u ibgw -f ibgateway | wc -l
-```
-
-A count of `0` means it died and `/tmp/ibgw.log` says why.
-
-**4.** Log in: **Paper Trading** tab, paper credentials. No 2FA.
-
-**5.** Confirm, as root:
-
-```bash
-ss -tlpn | grep 4002        # expect *:4002 -- see Step 7a for why not loopback
-ufw status | grep 4002      # expect DENY IN
-```
-
-**6.** Re-run the checkout to confirm the session is usable:
-
-```bash
-TRADING_MODE=paper IB_HOST=127.0.0.1 PYTHONPATH=/opt/ibgateway/bot-src \
-/opt/ibgateway/checkout-venv/bin/python -m app.cli ibkr-checkout --contract-month YYYYMMDD
-```
+`StartLimitBurst=3` stops a genuinely broken gateway restart-looping forever.
 
 ### Meanwhile the bot is safe without you
 
