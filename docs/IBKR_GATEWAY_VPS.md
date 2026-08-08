@@ -534,11 +534,18 @@ Finder → ⌘K → `vnc://localhost:5901`, then log in: **Paper Trading** tab, 
 Confirm, as root:
 
 ```bash
-ss -tlpn | grep 4002                       # expect *:4002 -- see 7a for why
-pgrep -u ibgw -f ibgateway | wc -l         # expect exactly 1
+ss -tlpn | grep 4002                                          # expect *:4002 -- see 7a
+pgrep -u ibgw -f 'install4j.ibgateway.GWClient' | wc -l       # expect exactly 1
 ```
 
-**Exactly one.** Two gateway instances fight over the same login: the second
+**Match the Java main class, never the bare string `ibgateway`.** Xtigervnc runs
+with `-auth /opt/ibgateway/.Xauthority` on its command line, so `pgrep -f
+ibgateway` matches the *display server* as well and reports 2 when one gateway is
+running. Worse, `pkill -u ibgw -f ibgateway` kills the VNC server — and a gateway
+launched afterwards against `DISPLAY=:1` then dies silently, because the display
+it was told to use no longer exists. That exact sequence cost an hour here.
+
+**Exactly one gateway.** Two instances fight over the same login: the second
 knocks out the first and bounces you back to the login screen after what looks
 like a successful sign-in. Same reason not to open Client Portal or the IBKR
 mobile app against this account while the gateway is up — that is error 10197,
@@ -547,17 +554,27 @@ classified non-retryable so the bot never joins the fight.
 ### Why systemd, and not a background job
 
 The first version of this procedure said to launch the gateway with `&`. It died
-twice in one evening.
+twice in one evening, for two different reasons, and only one of them was
+understood at the time.
 
-A plain `&` leaves the process attached to your SSH session's terminal, so it
-takes `SIGHUP` when the session drops. `setsid` fixes that — and it still died,
-along with the VNC server, because **`setsid` escapes a controlling terminal but
-not a systemd session cgroup**. When the login session ends, everything in its
-scope goes with it.
+The first death is unexplained. A plain `&` leaves the process attached to the
+SSH session's terminal, so `SIGHUP` on a dropped session is the obvious
+candidate, but the shell that owned the job was still alive afterwards — so that
+is a hypothesis, not a finding.
 
-A process holding a brokerage session for days cannot live inside a login
-session. These units put both in `/system.slice`, independent of anyone being
-logged in, and start them at boot:
+The second death was self-inflicted, by a diagnostic in this very document:
+`pkill -u ibgw -f ibgateway` killed the *VNC server* alongside the gateway,
+because Xtigervnc carries `/opt/ibgateway/.Xauthority` on its command line. The
+gateway launched immediately afterwards was pointed at a display that no longer
+existed and exited without complaint. The lesson is narrow and worth keeping:
+**a process-matching pattern that also matches a home directory path is a
+loaded gun**, and the `pgrep`/`pkill` commands above now match the Java main
+class instead.
+
+Neither cause survives the fix, which is why the fix is worth having regardless
+of which explanation was right. A process holding a brokerage session for days
+should not live inside a login session at all. These units put both in
+`/system.slice`, independent of anyone being logged in, and start them at boot:
 
 ```ini
 # /etc/systemd/system/vncserver@.service
