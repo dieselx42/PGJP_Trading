@@ -66,6 +66,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a private bridge and there is nothing on the host for a firewall to protect.
   What it costs is that root on the VPS is now equivalent to the IBKR password.
 
+- The TWS API is vendored into the image from IBKR's own distribution, pinned to
+  a version and verified against a SHA-256 checksum in a build stage. This
+  settles the packaging question in `docs/IBKR_API_NOTES.md` as Option A. The
+  bot container was stdlib-only, so `TRADING_MODE=paper` inside Docker failed at
+  `SOCKET_CONNECT` with the adapter's own "ibapi is not installed" refusal —
+  correct behaviour, and a decision that could not be deferred any further.
+
+  The checksum is the substance of it. Without one, "downloaded from IBKR" means
+  "downloaded from whatever answered that hostname during the build". The pinned
+  hash is of the archive already used to build the host virtualenv that first
+  proved the adapter works against a live gateway.
+
 ### Changed
 
 - The IBKR adapter, `docs/IBKR_API_NOTES.md` and `app/contracts/solana.py` no
