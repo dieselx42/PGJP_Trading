@@ -158,3 +158,70 @@ class TestTransmissionPolicy:
         # checked first, deliberately.
         with pytest.raises(BrokerOrderRejectedError, match="transmit=False"):
             await broker.place_order(request)
+
+
+class TestUnattributedErrors:
+    """Errors IBKR reports with reqId -1.
+
+    Observed against a real gateway: with Read-Only API mode on, reqOpenOrders
+    is refused with code 321 and reqId=-1. The adapter cannot know which pending
+    request that belongs to, so the request waits out its full timeout -- and
+    reported only "did not complete within 20.0s", which describes the symptom
+    and hides an immediate, explicit refusal.
+    """
+
+    def _session(self):
+        from app.broker.ibkr_broker import _IBSession
+
+        return _IBSession.__new__(_IBSession)
+
+    def _blank(self):
+        import threading
+
+        session = self._session()
+        session._lock = threading.Lock()
+        session._unattributed_error = None
+        return session
+
+    def test_nothing_recorded_means_nothing_reported(self) -> None:
+        from app.utilities.timeutils import utc_now
+
+        assert self._blank().unattributed_error_since(utc_now()) is None
+
+    def test_an_error_during_the_wait_is_reported(self) -> None:
+        from app.utilities.timeutils import utc_now
+
+        session = self._blank()
+        started = utc_now()
+        session.record_unattributed_error(
+            321,
+            "Error validating request.-'cq' : cause - The API interface is "
+            "currently in Read-Only mode.",
+        )
+        found = session.unattributed_error_since(started)
+        assert found is not None
+        assert "321" in found
+        assert "Read-Only mode" in found
+
+    def test_an_error_from_before_the_request_is_not_blamed_for_it(self) -> None:
+        """A connect-time notice must not be reported as a later timeout's cause."""
+        import time
+
+        from app.utilities.timeutils import utc_now
+
+        session = self._blank()
+        session.record_unattributed_error(321, "stale error from connect time")
+        time.sleep(0.01)
+        started = utc_now()
+
+        assert session.unattributed_error_since(started) is None
+
+    def test_read_only_refusal_classifies_as_not_retryable(self) -> None:
+        """321 under Read-Only mode must never be retried in a loop."""
+        error_class = classify_ib_error(
+            321,
+            "Error validating request.-'cq' : cause - The API interface is "
+            "currently in Read-Only mode.",
+        )
+        assert error_class is not None
+        assert error_class.retryable is False

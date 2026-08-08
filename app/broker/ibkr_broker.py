@@ -239,6 +239,42 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         self.ticks: dict[int, dict[str, Decimal]] = {}
         self.tick_request_contract: dict[int, str] = {}
         self.commissions: dict[str, tuple[Decimal, str]] = {}
+        #: The most recent error IBKR reported without attributing it to a
+        #: request id. See :meth:`unattributed_error_since` for why.
+        self._unattributed_error: tuple[datetime, int, str] | None = None
+
+    # -- unattributed errors ----------------------------------------------
+
+    def record_unattributed_error(self, code: int, message: str) -> None:
+        with self._lock:
+            self._unattributed_error = (utc_now(), code, message)
+
+    def unattributed_error_since(self, started_at: datetime) -> str | None:
+        """The last untargeted IBKR error that arrived after ``started_at``.
+
+        IBKR reports some rejections with ``reqId`` ``-1``, so the adapter
+        cannot know which pending request they belong to and must not guess --
+        failing the wrong request would be worse than failing none. But the
+        request it *does* belong to then waits out its full timeout and reports
+        ``BrokerTimeoutError``, which says nothing about the actual cause.
+
+        Observed case: with IB Gateway's Read-Only API mode on, ``reqOpenOrders``
+        is refused with code 321 and ``reqId=-1``. The pending future was never
+        completed, and the only evidence surfaced was "did not complete within
+        20.0s" -- a timeout standing in for a plain, immediate refusal.
+
+        Attaching the error to the timeout keeps the diagnosis without ever
+        mis-attributing it. The ``started_at`` bound matters: an error from
+        connect time must not be reported as the cause of a later timeout.
+        """
+        with self._lock:
+            recorded = self._unattributed_error
+        if recorded is None:
+            return None
+        seen_at, code, message = recorded
+        if seen_at < started_at:
+            return None
+        return f"IBKR {code}: {message}"
 
     # -- request plumbing -------------------------------------------------
 
@@ -313,6 +349,11 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
             self._reject(req_id, error_class(f"IBKR {code}: {message}"))
         elif error_class is BrokerConnectionError:
             self.fail_all(BrokerConnectionError(f"IBKR {code}: {message}"))
+        else:
+            # Not attributable to a request, and not fatal to the session. The
+            # request it actually refers to will time out; record this so the
+            # timeout can report why instead of just how long it waited.
+            self.record_unattributed_error(code, message)
 
     def connectionClosed(self) -> None:
         self.connection_closed.set()
@@ -696,14 +737,22 @@ class IBKRBroker(Broker):
 
     async def _await_request(self, future: ThreadFuture[Any], *, what: str) -> Any:
         loop = asyncio.get_running_loop()
+        started_at = utc_now()
         try:
             return await asyncio.wait_for(
                 asyncio.wrap_future(future, loop=loop), timeout=self._request_timeout
             )
         except TimeoutError as exc:
-            raise BrokerTimeoutError(
-                f"{what} did not complete within {self._request_timeout}s"
-            ) from exc
+            detail = f"{what} did not complete within {self._request_timeout}s"
+            session = self._session
+            if session is not None:
+                unattributed = session.unattributed_error_since(started_at)
+                if unattributed:
+                    detail += (
+                        f"; IBKR reported an error with no request id during that "
+                        f"window, which is very likely the cause: {unattributed}"
+                    )
+            raise BrokerTimeoutError(detail) from exc
 
     # ------------------------------------------------------------------
     # Account and state
