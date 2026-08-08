@@ -91,7 +91,8 @@ IB Gateway is a Java GUI application; a headless VPS has none of what it needs.
 ```bash
 apt-get update
 apt-get install -y --no-install-recommends \
-    tigervnc-standalone-server tigervnc-common \
+    tigervnc-standalone-server tigervnc-common tigervnc-tools \
+    xfonts-base x11-xserver-utils \
     icewm \
     libxext6 libxrender1 libxtst6 libxi6 libxrandr2 \
     libfreetype6 fontconfig fonts-dejavu-core
@@ -99,6 +100,22 @@ apt-get install -y --no-install-recommends \
 
 `icewm` is a deliberately tiny window manager — the gateway needs *a* window
 manager, not a desktop environment.
+
+Three of those are Ubuntu *Recommends* of `tigervnc-standalone-server`, which
+`--no-install-recommends` skips. Each one fails later rather than here, so name
+them explicitly:
+
+- **`tigervnc-tools`** provides `vncpasswd`. Without it Step 3 dies with
+  `vncpasswd: command not found` — `tigervnc-common` registers the `vncconfig`
+  alternative but not the password tool.
+- **`xfonts-base`** provides the `fixed` font. Xvnc refuses to start without it
+  (`could not open default font 'fixed'`).
+- **`x11-xserver-utils`** provides `xrdb` / `xsetroot`, which session startup
+  expects.
+
+Keeping `--no-install-recommends` is still correct — it is what stops a full
+desktop environment landing on a trading server — but it means the genuinely
+required Recommends have to be listed by hand.
 
 **This installs nothing that touches Traefik, Docker, or the existing stack.**
 
