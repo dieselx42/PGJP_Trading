@@ -118,23 +118,63 @@ the keyword form. It is unit tested for all three.
 
 ## Verification status
 
-> **This adapter has never been executed against a real IB Gateway.**
+**Verified against a real IB Gateway paper session on 2026-08-08** — ibapi
+10.30.1, server version 187, account `DU***787`, via `app.cli ibkr-checkout`.
 
-US futures permission for the account is still pending, so there was no session
-to test against. What that means concretely:
-
-| Tested | Not tested |
+| Verified against a live gateway | Still unverified |
 |---|---|
-| Error-code classification (info / connectivity / permission / contract / order) | Socket connect and handshake |
-| Account-type determination from account ids, including mixed lists | `managedAccounts` / `nextValidId` timing |
-| The `error` signature parser, all three forms | Contract qualification against real `contractDetails` |
-| Order-type transmission policy | Market data subscription and tick flow |
-| `transmit=False` refusal | Order placement, status callbacks, executions |
-| Contract → ibapi mapping helpers | Commission reports |
+| Socket connect and handshake | Order placement |
+| `managedAccounts` / `nextValidId` timing | Order status callbacks |
+| Account-type detection from a real `DU` id | Fills and executions from our own orders |
+| Account summary | Commission reports |
+| Positions | `get_open_orders` (see below) |
+| Executions (empty, but the call completes) | Market data ticks (see below) |
+| Contract qualification against live `contractDetails` | |
+| Error classification, against codes 321, 200 and 354 | |
 
-Every socket path should be treated as **unverified** until the read-only
-checkout in `RUNBOOK.md` step 9 has been completed. That checkout exists
-precisely because this code has not met a real gateway.
+Contract facts confirmed for MSL: multiplier `25`, min tick `0.05`, trading
+class `MSL`, exchange `CME`, timezone `US/Central`. IBKR lists expirations as
+full last-trade dates (`20260828`), not months, and quotes ten contracts —
+monthly through Jan 2027, quarterly after.
+
+### Two probes that cannot pass in this configuration
+
+**`OPEN_ORDERS_EMPTY`.** IB Gateway's Read-Only API mode refuses `reqOpenOrders`
+with code 321 and `reqId` `-1`. That is IBKR's behaviour, not a defect, but it
+means `get_open_orders` — and therefore order reconciliation — cannot be
+exercised until Read-Only mode is turned off at RUNBOOK step 10.
+
+**`MARKET_DATA`.** Code 354: the paper account has no live CME futures
+subscription, and IBKR offers delayed data instead. See
+`REASON_MARKET_DATA_DELAYED` — the system refuses to trade on delayed prices and
+there is no setting that permits it.
+
+### What the first real session found
+
+Three defects that unit tests against fakes could not have found, each the same
+shape: **IBKR said exactly what was wrong and the adapter turned it into an
+absence.**
+
+1. **An error with `reqId` `-1` orphaned its pending request.** A 321 refusal
+   matched neither the reject-by-id path nor the fail-everything path, so the
+   request waited out its full 20-second timeout and reported only how long it
+   had waited. Untargeted errors are now recorded and attached to whatever times
+   out during their window — without ever being attributed to a specific
+   request, because failing the wrong one would be worse.
+
+2. **A refused market-data subscription returned an empty tick.** Streaming
+   requests register no future, so `_reject` found nothing to fail and dropped
+   the error. An empty tick from a refusal was byte-identical to one from a
+   quiet market.
+
+3. **Delayed prices were indistinguishable from live ones.** Tick types 66/67/68
+   were mapped into the same `bid`/`ask`/`last` fields as 1/2/4. Every freshness
+   check would have passed — the tick did arrive a second ago; only the price in
+   it was fifteen minutes old.
+
+The third is the one to remember. It was not a bug in anything that had been
+written; it was a hazard that only existed once a real broker was on the other
+end of the socket.
 
 ---
 

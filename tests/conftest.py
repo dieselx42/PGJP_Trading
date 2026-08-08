@@ -137,6 +137,7 @@ def all_green_gate_context(**overrides: object) -> GateContext:
         "positions_reconciled": True,
         "open_orders_reconciled": True,
         "market_data_age_seconds": 1.0,
+        "market_data_is_delayed": False,
         "broker_permission_ready": True,
         "strategy_enabled": True,
         "risk_approved": True,

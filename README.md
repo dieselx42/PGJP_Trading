@@ -507,6 +507,15 @@ make cancel-all-orders                      # cancel working orders (NOT positio
 make verify-running                         # assert the running config is approved
 ```
 
+One command has no `make` target, because it is not part of daily operations:
+
+```bash
+python -m app.cli ibkr-checkout [--contract-month YYYYMM]
+```
+
+It connects to IB Gateway read-only and reports whether the adapter actually
+works — see [Verifying the adapter](#verifying-the-adapter) below.
+
 There is deliberately **no** `kill-switch-off` and **no** `enable-live`.
 Resuming trading is a configuration change plus a restart. The friction is the
 feature.
@@ -531,10 +540,40 @@ what I recommend. **Read that before installing the extra.**
 > permission for the account is still pending, so there was no session to test
 > against. Its pure logic (error classification, account-type determination,
 > signature parsing, order-type policy) is unit tested; every socket path is
-> unverified. `RUNBOOK.md` has the read-only checkout to run first.
+> unverified.
 
 IB Gateway owns authentication. This project stores no IBKR username, password,
 or 2FA material, and does nothing to bypass IBKR's security controls.
+
+### Verifying the adapter
+
+```bash
+python -m app.cli ibkr-checkout [--contract-month YYYYMM]
+```
+
+`app/broker/checkout.py` connects once, runs every read-only call the system
+depends on, and reports PASS / FAIL / SKIP per probe with the evidence it saw.
+It exits non-zero if anything failed, and an empty report is a failure rather
+than a pass — a checkout that observed nothing has verified nothing.
+
+It **cannot place an order**, enforced three overlapping ways:
+
+1. The broker is typed as `ReadOnlyBroker`, a Protocol with no write methods, so
+   `mypy --strict` rejects `place_order` here as an attribute error rather than
+   as a policy violation. A test parses the module's AST and asserts the same.
+2. It refuses to run unless `ALLOW_ORDER_TRANSMIT=false`, `KILL_SWITCH=true` and
+   the mode is `paper`. In the deployed `mock` posture it returns
+   `CHECKOUT_REFUSED` without opening a socket.
+3. Its final probe forces every session-side condition to its most permissive
+   value and requires `TransmitGate` to refuse anyway.
+
+The third is the one that matters. The first two say the checkout is safe; the
+third says the *system* is at the moment a real broker session exists — the
+first point at which that claim is testable against something other than a fake.
+
+It connects on `IB_ADMIN_CLIENT_ID`, never the trading process's client id, so
+it cannot disconnect a running bot. `RUNBOOK.md` step 7 has the full sequence
+and what each failure means.
 
 ---
 
@@ -560,3 +599,5 @@ or 2FA material, and does nothing to bypass IBKR's security controls.
 | [RUNBOOK.md](RUNBOOK.md) | Every operational procedure, including recovery |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [docs/IBKR_API_NOTES.md](docs/IBKR_API_NOTES.md) | TWS API packaging problem and options |
+| [docs/IBKR_PAPER_CHECKOUT.md](docs/IBKR_PAPER_CHECKOUT.md) | Step-by-step for the first real gateway session, and where the IBKR credential goes |
+| [docs/IBKR_GATEWAY_VPS.md](docs/IBKR_GATEWAY_VPS.md) | Running IB Gateway on the VPS: interactive login over a tunnel, keeping 4002 off the internet |

@@ -158,3 +158,115 @@ class TestTransmissionPolicy:
         # checked first, deliberately.
         with pytest.raises(BrokerOrderRejectedError, match="transmit=False"):
             await broker.place_order(request)
+
+
+class TestUnattributedErrors:
+    """Errors IBKR reports with reqId -1.
+
+    Observed against a real gateway: with Read-Only API mode on, reqOpenOrders
+    is refused with code 321 and reqId=-1. The adapter cannot know which pending
+    request that belongs to, so the request waits out its full timeout -- and
+    reported only "did not complete within 20.0s", which describes the symptom
+    and hides an immediate, explicit refusal.
+    """
+
+    def _session(self):
+        from app.broker.ibkr_broker import _IBSession
+
+        return _IBSession.__new__(_IBSession)
+
+    def _blank(self):
+        import threading
+
+        session = self._session()
+        session._lock = threading.Lock()
+        session._unattributed_error = None
+        return session
+
+    def test_nothing_recorded_means_nothing_reported(self) -> None:
+        from app.utilities.timeutils import utc_now
+
+        assert self._blank().unattributed_error_since(utc_now()) is None
+
+    def test_an_error_during_the_wait_is_reported(self) -> None:
+        from app.utilities.timeutils import utc_now
+
+        session = self._blank()
+        started = utc_now()
+        session.record_unattributed_error(
+            321,
+            "Error validating request.-'cq' : cause - The API interface is "
+            "currently in Read-Only mode.",
+        )
+        found = session.unattributed_error_since(started)
+        assert found is not None
+        assert "321" in found
+        assert "Read-Only mode" in found
+
+    def test_an_error_from_before_the_request_is_not_blamed_for_it(self) -> None:
+        """A connect-time notice must not be reported as a later timeout's cause."""
+        import time
+
+        from app.utilities.timeutils import utc_now
+
+        session = self._blank()
+        session.record_unattributed_error(321, "stale error from connect time")
+        time.sleep(0.01)
+        started = utc_now()
+
+        assert session.unattributed_error_since(started) is None
+
+    def test_read_only_refusal_classifies_as_not_retryable(self) -> None:
+        """321 under Read-Only mode must never be retried in a loop."""
+        error_class = classify_ib_error(
+            321,
+            "Error validating request.-'cq' : cause - The API interface is "
+            "currently in Read-Only mode.",
+        )
+        assert error_class is not None
+        assert error_class.retryable is False
+
+
+class TestStreamingSubscriptionErrors:
+    """Errors aimed at a request that has no pending future.
+
+    Market data is a streaming subscription: there is no single response to
+    complete, so `_reject` finds nothing to fail and the refusal used to vanish.
+    The caller then saw an empty tick -- identical to a quiet market, and a
+    completely different problem.
+    """
+
+    def _session(self):
+        import threading
+
+        from app.broker.ibkr_broker import _IBSession
+
+        session = _IBSession.__new__(_IBSession)
+        session._lock = threading.Lock()
+        session._pending = {}
+        session._request_errors = {}
+        return session
+
+    def test_reject_reports_when_there_was_no_pending_request(self) -> None:
+        assert self._session()._reject(4242, BrokerError("boom")) is False
+
+    def test_reject_reports_when_it_did_fail_one(self) -> None:
+        from concurrent.futures import Future
+
+        from app.broker.ibkr_broker import _PendingRequest
+
+        session = self._session()
+        future: Future = Future()
+        session._pending[4242] = _PendingRequest(future=future)
+
+        assert session._reject(4242, BrokerError("boom")) is True
+        assert isinstance(future.exception(), BrokerError)
+
+    def test_a_recorded_error_is_retrievable_by_request_id(self) -> None:
+        session = self._session()
+        session.record_request_error(7, BrokerPermissionError("IBKR 354: not subscribed"))
+
+        found = session.request_error(7)
+        assert isinstance(found, BrokerPermissionError)
+        assert "354" in str(found)
+        assert session.request_error(8) is None

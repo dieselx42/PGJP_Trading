@@ -15,12 +15,21 @@ modes run with no IBKR code loaded at all.
 
 Verification status
 -------------------
-**This adapter has never been executed against a real IB Gateway.** US futures
-trading permission for the account is still pending, so there was no session to
-test against. The code is written to the documented API and is exercised by
-unit tests only through its pure helpers (error classification, account-type
-determination, contract mapping). Treat every path that talks to a socket as
-unverified until the read-only checkout in ``RUNBOOK.md`` has been completed.
+Verified against a real IB Gateway paper session (2026-08-08, ibapi 10.30.1,
+server version 187) via ``app.cli ibkr-checkout``. Confirmed working: socket
+connect and handshake, ``managedAccounts``/``nextValidId`` timing, account-type
+detection from a real ``DU`` account id, account summary, positions,
+executions, and contract qualification against live ``contractDetails``. Error
+classification met three genuine IBKR errors -- 321, 200 and 354 -- and typed
+each correctly as non-retryable.
+
+Still unverified: order placement, order-status callbacks, fills and commission
+reports. Those need ``ALLOW_ORDER_TRANSMIT=true`` and IB Gateway's Read-Only API
+mode off, which is RUNBOOK step 10 and a separate decision.
+
+Note that ``reqOpenOrders`` is refused outright while Read-Only API mode is on
+(code 321, ``reqId`` -1), so ``get_open_orders`` cannot be exercised in that
+configuration.
 
 Account identity
 ----------------
@@ -238,7 +247,48 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         self.order_statuses: dict[str, BrokerOrderSnapshot] = {}
         self.ticks: dict[int, dict[str, Decimal]] = {}
         self.tick_request_contract: dict[int, str] = {}
+        #: Request ids that have received at least one delayed tick.
+        self.delayed_requests: set[int] = set()
         self.commissions: dict[str, tuple[Decimal, str]] = {}
+        #: The most recent error IBKR reported without attributing it to a
+        #: request id. See :meth:`unattributed_error_since` for why.
+        self._unattributed_error: tuple[datetime, int, str] | None = None
+        #: Errors attributed to a request id that had no pending future --
+        #: streaming subscriptions. See :meth:`request_error`.
+        self._request_errors: dict[int, BrokerError] = {}
+
+    # -- unattributed errors ----------------------------------------------
+
+    def record_unattributed_error(self, code: int, message: str) -> None:
+        with self._lock:
+            self._unattributed_error = (utc_now(), code, message)
+
+    def unattributed_error_since(self, started_at: datetime) -> str | None:
+        """The last untargeted IBKR error that arrived after ``started_at``.
+
+        IBKR reports some rejections with ``reqId`` ``-1``, so the adapter
+        cannot know which pending request they belong to and must not guess --
+        failing the wrong request would be worse than failing none. But the
+        request it *does* belong to then waits out its full timeout and reports
+        ``BrokerTimeoutError``, which says nothing about the actual cause.
+
+        Observed case: with IB Gateway's Read-Only API mode on, ``reqOpenOrders``
+        is refused with code 321 and ``reqId=-1``. The pending future was never
+        completed, and the only evidence surfaced was "did not complete within
+        20.0s" -- a timeout standing in for a plain, immediate refusal.
+
+        Attaching the error to the timeout keeps the diagnosis without ever
+        mis-attributing it. The ``started_at`` bound matters: an error from
+        connect time must not be reported as the cause of a later timeout.
+        """
+        with self._lock:
+            recorded = self._unattributed_error
+        if recorded is None:
+            return None
+        seen_at, code, message = recorded
+        if seen_at < started_at:
+            return None
+        return f"IBKR {code}: {message}"
 
     # -- request plumbing -------------------------------------------------
 
@@ -264,11 +314,30 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         if pending is not None and not pending.future.done():
             pending.future.set_result(value)
 
-    def _reject(self, request_id: int, error: BaseException) -> None:
+    def _reject(self, request_id: int, error: BaseException) -> bool:
+        """Fail the pending request. Returns False when there was none.
+
+        Streaming subscriptions (market data) have no pending future to fail --
+        there is no single response to complete -- so a refusal aimed at one
+        would otherwise be dropped on the floor. The caller records those
+        instead; see :meth:`request_error`.
+        """
         with self._lock:
             pending = self._pending.pop(request_id, None)
-        if pending is not None and not pending.future.done():
+        if pending is None:
+            return False
+        if not pending.future.done():
             pending.future.set_exception(error)
+        return True
+
+    def record_request_error(self, request_id: int, error: BrokerError) -> None:
+        with self._lock:
+            self._request_errors[request_id] = error
+
+    def request_error(self, request_id: int) -> BrokerError | None:
+        """Any error IBKR reported against a request with no pending future."""
+        with self._lock:
+            return self._request_errors.get(request_id)
 
     def fail_all(self, error: BaseException) -> None:
         with self._lock:
@@ -310,9 +379,20 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
             },
         )
         if req_id is not None and req_id > 0:
-            self._reject(req_id, error_class(f"IBKR {code}: {message}"))
+            failure = error_class(f"IBKR {code}: {message}")
+            if not self._reject(req_id, failure):
+                # A streaming subscription: no future to fail, so keep it for
+                # whoever reads that subscription's data. Without this, a
+                # refused market-data request is indistinguishable from a quiet
+                # market.
+                self.record_request_error(req_id, failure)
         elif error_class is BrokerConnectionError:
             self.fail_all(BrokerConnectionError(f"IBKR {code}: {message}"))
+        else:
+            # Not attributable to a request, and not fatal to the session. The
+            # request it actually refers to will time out; record this so the
+            # timeout can report why instead of just how long it waited.
+            self.record_unattributed_error(code, message)
 
     def connectionClosed(self) -> None:
         self.connection_closed.set()
@@ -451,6 +531,12 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         field_name = _TICK_PRICE_FIELDS.get(tickType)
         if field_name is None:
             return
+        if tickType in _DELAYED_TICK_TYPES:
+            # Recorded, never hidden. Delayed ticks carry the same field names
+            # as real-time ones, so without this the two are indistinguishable
+            # downstream and the system would price orders off data that is
+            # fifteen minutes old.
+            self.delayed_requests.add(reqId)
         self.ticks.setdefault(reqId, {})[field_name] = _to_decimal(price)
         self.last_message_at = utc_now()
 
@@ -466,6 +552,11 @@ _TICK_PRICE_FIELDS: Final[dict[int, str]] = {
     67: "ask",  # delayed ask
     68: "last",  # delayed last
 }
+
+#: IBKR's delayed equivalents of bid/ask/last. They are accepted -- refusing to
+#: parse them would only make the delay invisible -- but every tick built from
+#: one is flagged, and the transmit gate refuses to trade on a flagged tick.
+_DELAYED_TICK_TYPES: Final[frozenset[int]] = frozenset({66, 67, 68})
 
 #: IBKR order status strings mapped onto our vocabulary.
 IB_STATUS_MAP: Final[dict[str, OrderStatus]] = {
@@ -564,9 +655,10 @@ class IBKRBroker(Broker):
     async def connect(self) -> ConnectionInfo:
         if not ibapi_available():
             raise BrokerConnectionError(
-                "the official IBKR TWS API (ibapi) is not installed. "
-                "Install the optional extra with `pip install -e '.[ibkr]'` after reading "
-                "docs/IBKR_API_NOTES.md. DISABLED and MOCK modes do not require it."
+                "the IBKR TWS API (ibapi) is not installed. It is deliberately not a "
+                "runtime dependency: how it gets installed is a supply-chain decision "
+                "for the component that can place orders, and docs/IBKR_API_NOTES.md "
+                "sets out the options. DISABLED and MOCK modes do not require it."
             )
         if self.is_connected():
             return self.get_connection_info()
@@ -695,14 +787,22 @@ class IBKRBroker(Broker):
 
     async def _await_request(self, future: ThreadFuture[Any], *, what: str) -> Any:
         loop = asyncio.get_running_loop()
+        started_at = utc_now()
         try:
             return await asyncio.wait_for(
                 asyncio.wrap_future(future, loop=loop), timeout=self._request_timeout
             )
         except TimeoutError as exc:
-            raise BrokerTimeoutError(
-                f"{what} did not complete within {self._request_timeout}s"
-            ) from exc
+            detail = f"{what} did not complete within {self._request_timeout}s"
+            session = self._session
+            if session is not None:
+                unattributed = session.unattributed_error_since(started_at)
+                if unattributed:
+                    detail += (
+                        f"; IBKR reported an error with no request id during that "
+                        f"window, which is very likely the cause: {unattributed}"
+                    )
+            raise BrokerTimeoutError(detail) from exc
 
     # ------------------------------------------------------------------
     # Account and state
@@ -899,6 +999,16 @@ class IBKRBroker(Broker):
             await asyncio.sleep(0.5)
 
         values = session.ticks.get(request_id, {})
+        if not values:
+            # No ticks. Distinguish "IBKR refused the subscription" from "the
+            # market is quiet" -- they are the same empty result and completely
+            # different problems. A refusal is a permission error a human has to
+            # fix at IBKR; a quiet market outside liquid hours is nothing.
+            refusal = session.request_error(request_id)
+            if refusal is not None:
+                self._market_data_requests.pop(key, None)
+                raise refusal
+
         return MarketDataTick(
             contract_key=key,
             received_at=utc_now(),
@@ -906,6 +1016,7 @@ class IBKRBroker(Broker):
             bid=values.get("bid"),
             ask=values.get("ask"),
             last=values.get("last"),
+            is_delayed=request_id in session.delayed_requests,
         )
 
     async def cancel_market_data(self, contract: QualifiedContract) -> None:

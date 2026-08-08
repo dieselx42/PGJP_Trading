@@ -303,6 +303,69 @@ def cmd_verify(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK if approved else EXIT_ERROR
 
 
+async def _ibkr_checkout(config: Config, contract_month: str | None) -> dict[str, object]:
+    """Connect read-only on the admin client id and report what was observed."""
+    from app.broker.checkout import run_checkout  # noqa: PLC0415
+    from app.broker.ibkr_broker import IBKRBroker  # noqa: PLC0415
+    from app.safety.gate import expected_account_type  # noqa: PLC0415
+
+    port = config.ib_port
+    assert port is not None  # guaranteed by the paper-mode precondition
+    broker = IBKRBroker(
+        host=config.ibkr.host,
+        port=port,
+        # The admin client id, so a checkout can never disconnect a running bot.
+        client_id=config.ibkr.admin_client_id,
+        connect_timeout_seconds=config.ibkr.connect_timeout_seconds,
+        expected_account_type=expected_account_type(config.trading_mode),
+    )
+    report = await run_checkout(config, broker, contract_month=contract_month)
+    return report.describe()
+
+
+def cmd_ibkr_checkout(config: Config, args: argparse.Namespace) -> int:
+    """Verify the IBKR adapter against a real gateway, reading only.
+
+    Every socket path in `app/broker/ibkr_broker.py` is unverified until this
+    passes; the unit tests around it drive fakes. This command cannot place an
+    order -- see the module docstring in `app/broker/checkout.py` for how that
+    is enforced -- and it refuses to run unless the interlocks are engaged.
+    """
+    import asyncio  # noqa: PLC0415
+
+    from app.broker.checkout import ProbeStatus, preconditions  # noqa: PLC0415
+    from app.logging_config import configure_logging  # noqa: PLC0415
+
+    # Without this, the adapter's log records fall through to logging's
+    # last-resort handler, which prints the bare message ("ibkr error") and
+    # discards every structured field -- the IB error code, the message, how it
+    # was classified, whether it is retryable. That is precisely the information
+    # a diagnostic exists to surface. Logs go to stderr so the report on stdout
+    # stays parseable; no file sink, because this is not the trading process and
+    # must not touch its log directory.
+    configure_logging(config, run_id="ibkr-checkout", log_to_file=False, stream=sys.stderr)
+
+    blocking = [p for p in preconditions(config) if p.status is ProbeStatus.FAIL]
+    if blocking:
+        _emit(
+            {
+                "result": "CHECKOUT_REFUSED",
+                "detail": "the configuration does not permit a read-only checkout",
+                "failures": [{"name": p.name, "detail": p.detail} for p in blocking],
+            }
+        )
+        return EXIT_ERROR
+
+    try:
+        payload = asyncio.run(_ibkr_checkout(config, args.contract_month))
+    except Exception as exc:  # noqa: BLE001 -- report, do not traceback at an operator
+        _emit({"result": "CHECKOUT_ERROR", "error": str(exc), "error_class": type(exc).__name__})
+        return EXIT_ERROR
+
+    _emit({**payload, **build_info(config)})
+    return EXIT_OK if payload.get("result") == "CHECKOUT_PASSED" else EXIT_ERROR
+
+
 def cmd_config(config: Config, args: argparse.Namespace) -> int:
     del args
     _emit({"config": config.redacted(), **build_info(config)})
@@ -325,6 +388,7 @@ COMMANDS = {
     "db-info": cmd_db_info,
     "config": cmd_config,
     "verify": cmd_verify,
+    "ibkr-checkout": cmd_ibkr_checkout,
 }
 
 
@@ -348,6 +412,16 @@ def build_parser() -> argparse.ArgumentParser:
                 "--confirm",
                 action="store_true",
                 help="required; cancels every working order at the broker",
+            )
+        if name == "ibkr-checkout":
+            sub.add_argument(
+                "--contract-month",
+                default=None,
+                metavar="YYYYMM",
+                help=(
+                    "expiration to qualify for this run only; never written back to .env. "
+                    "Omitted means the contract probe is skipped rather than guessed."
+                ),
             )
     return parser
 

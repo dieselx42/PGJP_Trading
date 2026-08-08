@@ -3,6 +3,71 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `app/broker/checkout.py` and `app.cli ibkr-checkout` — a read-only checkout of
+  a real IB Gateway session. Every socket path in the IBKR adapter was
+  unverified: the unit tests around it drive fakes because there has never been
+  a gateway to point it at. The checkout connects once on the admin client id,
+  runs each read-only call the system depends on, and reports PASS / FAIL / SKIP
+  per probe with the evidence it saw, so a wrong answer is visible rather than
+  something an operator has to notice.
+
+  It cannot place an order. The broker is typed as a `ReadOnlyBroker` Protocol
+  with no write methods, so `mypy --strict` rejects one; it refuses to run
+  unless the interlocks are engaged and the mode is `paper`; and its final probe
+  forces every session-side condition green and requires `TransmitGate` to
+  refuse anyway. An empty report is a failure, not a pass — the distinction that
+  `verify_running.sh` got wrong before it was deleted.
+
+- `docs/IBKR_PAPER_CHECKOUT.md` — the step-by-step for the first real gateway
+  session. It exists because "add IBKR credentials" is the obvious next thought
+  and there is no such step: the credential is typed into IB Gateway's login
+  window and never enters this repository. The guide leads with that, then
+  covers the paper account, the API lockdown, the Mac-local `.env` (whose
+  container paths are a real trap), and the one expected `POSTURE_NOT_APPROVED`
+  that would otherwise look like a fault.
+
+- `docs/IBKR_GATEWAY_VPS.md` — running IB Gateway on the Hostinger host, with
+  interactive login over an SSH-tunnelled VNC session and no login automation.
+
+  It revises an earlier recommendation. IB Gateway has no bind-address setting,
+  only an "allow connections from localhost only" checkbox, so reaching it from
+  a bridged container would mean unticking that box and letting the API listen
+  on every interface — leaving a firewall rule as the only thing between port
+  4002 and the internet. Joining the host network namespace instead keeps the
+  box ticked, which makes "not reachable from outside" a property of the socket
+  rather than a rule that has to stay correct.
+
+  Sequenced so the adapter is proven from a host virtualenv before the container
+  networking changes at all. The two fail in similar-looking ways and are much
+  easier to diagnose apart.
+
+- `MARKET_DATA_IS_DELAYED` — a new transmit-gate interlock. IBKR serves delayed
+  quotes in the same tick fields as real-time ones, so an unsubscribed account
+  produced data that passed every freshness check while carrying prices fifteen
+  minutes old. Delayed ticks are flagged where they are parsed and refused at
+  the gate, with no setting to permit them. `GateContext.market_data_is_delayed`
+  defaults to `True`, the refusing answer, like every other field on that class.
+
+### Changed
+
+- The IBKR adapter, `docs/IBKR_API_NOTES.md` and `app/contracts/solana.py` no
+  longer claim to be unverified. The adapter met a real gateway on 2026-08-08
+  and most of what those files warned about is now confirmed working — a stale
+  "do not trust this" is its own hazard. What remains unverified is listed
+  explicitly rather than left as a blanket caveat.
+
+- `RUNBOOK.md` recommends running IB Gateway on a local machine before the VPS.
+  Whether the adapter works and whether it can run headless and unattended are
+  independent questions, and answering the first does not require solving the
+  second.
+- The "ibapi is not installed" error no longer names a specific install command.
+  Which distribution to install is the open supply-chain decision in
+  `docs/IBKR_API_NOTES.md`, and the error should not pre-empt it.
+
 ## [0.1.0] — 2026-08-07
 
 Initial infrastructure. **This release cannot place an order**, by design and by

@@ -20,7 +20,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, TextIO
 
 from app.config import Config
 from app.utilities.timeutils import utc_now
@@ -263,8 +263,20 @@ class TextFormatter(logging.Formatter):
 # ---------------------------------------------------------------------------
 
 
-def configure_logging(config: Config, *, run_id: str, log_to_file: bool = True) -> logging.Logger:
-    """Install handlers on the root logger. Idempotent within a process."""
+def configure_logging(
+    config: Config,
+    *,
+    run_id: str,
+    log_to_file: bool = True,
+    stream: TextIO | None = None,
+) -> logging.Logger:
+    """Install handlers on the root logger. Idempotent within a process.
+
+    ``stream`` defaults to stdout, which is what the trading process wants --
+    Docker captures it. Operator commands that print a machine-readable report
+    on stdout pass ``sys.stderr`` instead, so log lines cannot interleave with
+    the report and ``2>/dev/null`` still yields parseable JSON.
+    """
     set_run_id(run_id)
 
     root = logging.getLogger()
@@ -278,7 +290,7 @@ def configure_logging(config: Config, *, run_id: str, log_to_file: bool = True) 
     )
     filters: Iterable[logging.Filter] = (ContextFilter(), RedactionFilter())
 
-    stream_handler = logging.StreamHandler(stream=sys.stdout)
+    stream_handler = logging.StreamHandler(stream=stream if stream is not None else sys.stdout)
     stream_handler.setFormatter(formatter)
     for log_filter in filters:
         stream_handler.addFilter(log_filter)

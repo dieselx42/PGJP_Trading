@@ -28,6 +28,10 @@ class Quote:
     bid_size: int | None = None
     ask_size: int | None = None
 
+    #: Carried from the broker tick. A delayed quote is not a price an
+    #: automated system may act on, and the transmit gate refuses it.
+    is_delayed: bool = False
+
     def __post_init__(self) -> None:
         # Rejects naive datetimes outright; see app.utilities.timeutils.
         ensure_utc(self.received_at)
