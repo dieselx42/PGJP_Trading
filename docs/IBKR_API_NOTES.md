@@ -6,9 +6,9 @@ The adapter in `app/broker/ibkr_broker.py` targets the **official Interactive
 Brokers TWS API** (`ibapi`: `EClient` / `EWrapper`), per the brief's instruction
 not to reach for a convenient-but-abandoned wrapper.
 
-There is one real problem with that choice, and it is a packaging problem rather
-than a technical one. **I have not installed anything. Read this and tell me
-which option you want.**
+There was one real problem with that choice, a packaging one rather than a
+technical one. **It is now decided: Option A below.** The options are kept
+because the reasoning is what makes the decision reviewable, not the outcome.
 
 ---
 
@@ -42,29 +42,34 @@ message rather than an `ImportError`.
 
 ## Options
 
-### Option A — Vendor the official source (recommended)
+### Option A — Vendor the official source (CHOSEN)
 
-Download the TWS API from IBKR directly and install from the extracted source:
+Implemented in the `ibapi-build` stage of the `Dockerfile`: the TWS API is
+downloaded from IBKR at build time, pinned to a version, verified against a
+SHA-256 checksum, installed into `/vendor`, and copied into the runtime image
+owned by root rather than the application user.
 
-```bash
-# On the VPS, from the official IBKR download
-wget https://interactivebrokers.github.io/downloads/twsapi_macunix.<version>.zip
-unzip twsapi_macunix.<version>.zip
-cd IBJts/source/pythonclient
-pip install .
+```dockerfile
+ARG TWSAPI_VERSION=1030.01
+ARG TWSAPI_SHA256=ea79fa5b...
 ```
 
-**For:** authentically IBKR's code, from IBKR, with a checksum you can verify
-against their site. No third party in the supply chain.
+**The checksum is the point.** Without it, "downloaded from IBKR" only means
+"downloaded from whatever answered that hostname during the build". The pinned
+hash is of the archive that was fetched by hand and used to build the host
+virtualenv that first proved the adapter works against a live gateway — so the
+image is pinned to an artifact with known provenance, not merely to a URL.
 
-**Against:** the download URL and version have to be updated by hand; it is not
-a `pip install -r requirements.txt` away; the Docker build needs the archive
-present in the build context or fetched at build time.
+Update `TWSAPI_VERSION` and `TWSAPI_SHA256` together, deliberately, verifying the
+hash against a copy you fetched yourself.
 
-**My recommendation.** For the single component that can move money, a manual
-step you do once per upgrade is a good trade for removing a third party from the
-chain. It also fits how this project already works — the runtime has no
-dependencies at all today.
+**For:** authentically IBKR's code, from IBKR. No third party in the supply chain
+for the one component that can place orders. Nothing resolved from a package
+index at build time, so a deploy cannot change because something upstream was
+republished.
+
+**Against:** the version and hash are updated by hand. That is the cost, and for
+this component it is worth paying once per upgrade.
 
 ### Option B — Install the PyPI redistribution
 
