@@ -30,6 +30,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   container paths are a real trap), and the one expected `POSTURE_NOT_APPROVED`
   that would otherwise look like a fault.
 
+- `docs/IBKR_GATEWAY_VPS.md` — running IB Gateway on the Hostinger host, with
+  interactive login over an SSH-tunnelled VNC session and no login automation.
+
+  It revises an earlier recommendation. IB Gateway has no bind-address setting,
+  only an "allow connections from localhost only" checkbox, so reaching it from
+  a bridged container would mean unticking that box and letting the API listen
+  on every interface — leaving a firewall rule as the only thing between port
+  4002 and the internet. Joining the host network namespace instead keeps the
+  box ticked, which makes "not reachable from outside" a property of the socket
+  rather than a rule that has to stay correct.
+
+  Sequenced so the adapter is proven from a host virtualenv before the container
+  networking changes at all. The two fail in similar-looking ways and are much
+  easier to diagnose apart.
+
 ### Changed
 
 - `RUNBOOK.md` recommends running IB Gateway on a local machine before the VPS.
