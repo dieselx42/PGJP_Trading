@@ -46,6 +46,32 @@ reinstall would flatten.
 
 ## Setup
 
+### 0. Stop the host-installed gateway first
+
+If `docs/IBKR_GATEWAY_VPS.md` was followed and a host gateway is logged in,
+**stop it before starting the container**:
+
+```bash
+systemctl disable --now ibgateway vncserver@1
+ss -tlpn | grep -E ':400[1-4]' || echo "host gateway gone - correct"
+```
+
+IBKR permits one session per login. With both running, IBC authenticates and
+then stops at a dialog:
+
+```
+IBC: detected dialog entitled: Existing session detected
+IBC: User must choose whether to continue with this session (scenario 1)
+```
+
+It is waiting for an answer it has deliberately not been configured to give.
+
+Stopping first looks like the wrong order — confirming the replacement works
+before retiring what it replaces is normally right — but the two cannot run at
+once, so there is nothing to confirm while both exist. `systemctl disable`
+leaves everything on disk, so `systemctl enable --now ibgateway vncserver@1`
+puts the old path back if the container disappoints.
+
 ### 1. Create the credential file
 
 ```bash
@@ -168,17 +194,15 @@ docker compose exec -T sol-trading-bot python -m app.cli verify
 
 Want `APPROVED_POSTURE` 12/12 and both containers healthy.
 
-## Decommissioning the host-installed gateway
+## The host-installed gateway
 
-Once the container works, the host install is redundant and is a second thing
-that can hold port 4002:
+Stopped in step 0, before the container was ever started — see there for why the
+usual "confirm the replacement first" ordering does not apply.
 
-```bash
-systemctl disable --now ibgateway vncserver@1
-```
-
-Leave the files in place until you are satisfied — nothing costs anything by
-sitting on disk, and the ufw denies on 4001/4002 stay useful either way.
+Leave the files and the systemd units on disk. `systemctl enable --now ibgateway
+vncserver@1` restores the manual-login path, which is the only credential-free
+way to run this. Keep the ufw denies on 4001/4002 either way: they cost nothing
+and they matter the moment anything binds those ports on the host again.
 
 ## Pinning the image
 
