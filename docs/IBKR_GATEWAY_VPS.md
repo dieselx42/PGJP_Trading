@@ -516,26 +516,56 @@ su - ibgw
 vncserver :1 -localhost yes -geometry 1440x900 -depth 24
 ```
 
-**2.** Tunnel from your Mac, in its own window, and leave it running:
+**2.** Tunnel from your Mac, in its own window, and leave it running. The reboot
+killed the old one:
 
 ```bash
 ssh -N -L 5901:127.0.0.1:5901 root@srv1792440.hstgr.cloud
 ```
 
+Check it before opening Screen Sharing, because the failure mode is confusing:
+
+```bash
+lsof -nP -iTCP:5901 -sTCP:LISTEN     # expect ssh on 127.0.0.1:5901
+```
+
+With no tunnel, macOS reports *"Connection failed to localhost — make sure Screen
+Sharing or Remote Management is enabled on the remote computer"*, which points
+you at System Settings on the wrong machine entirely. Nothing is listening
+locally; that is all it means.
+
 Then Finder → ⌘K → `vnc://localhost:5901`.
 
 **3.** Launch the gateway from the **SSH** session, not the VNC desktop — there
-is no terminal emulator installed there. Its window appears in VNC:
+is no terminal emulator installed there. Its window appears in VNC.
 
-```bash
-su - ibgw
-```
+`su - ibgw` only if you are root; from an `ibgw` shell it prompts for a password
+that does not exist, because the account is deliberately locked.
+
 ```bash
 export DISPLAY=:1
 ```
 ```bash
-/opt/ibgateway/Jts/ibgateway/*/ibgateway &
+setsid nohup /opt/ibgateway/Jts/ibgateway/*/ibgateway > /tmp/ibgw.log 2>&1 < /dev/null &
 ```
+
+**`setsid` is not optional.** A plain `&` leaves the gateway attached to your SSH
+session's terminal, so it takes `SIGHUP` and dies the moment that session drops —
+a sleeping laptop, a flaky link, a closed lid. Observed: launched with `&`, gone
+minutes later, with no error anywhere because its output died with the terminal.
+A process that must hold a brokerage session for days cannot depend on your SSH
+connection staying up. `setsid` gives it its own session with no controlling
+terminal; the redirect keeps its output somewhere that survives.
+
+Confirm it is actually running before looking for its window — a silent
+disappearance is the failure mode here:
+
+```bash
+sleep 30
+tail -40 /tmp/ibgw.log; echo "--- alive? ---"; pgrep -u ibgw -f ibgateway | wc -l
+```
+
+A count of `0` means it died and `/tmp/ibgw.log` says why.
 
 **4.** Log in: **Paper Trading** tab, paper credentials. No 2FA.
 
