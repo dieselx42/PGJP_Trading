@@ -600,4 +600,5 @@ and what each failure means.
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [docs/IBKR_API_NOTES.md](docs/IBKR_API_NOTES.md) | TWS API packaging problem and options |
 | [docs/IBKR_PAPER_CHECKOUT.md](docs/IBKR_PAPER_CHECKOUT.md) | Step-by-step for the first real gateway session, and where the IBKR credential goes |
-| [docs/IBKR_GATEWAY_VPS.md](docs/IBKR_GATEWAY_VPS.md) | Running IB Gateway on the VPS: interactive login over a tunnel, keeping 4002 off the internet |
+| [docs/IBKR_GATEWAY_DOCKER.md](docs/IBKR_GATEWAY_DOCKER.md) | IB Gateway as a container with IBC — the current setup, and what storing the credential costs |
+| [docs/IBKR_GATEWAY_VPS.md](docs/IBKR_GATEWAY_VPS.md) | Superseded: host-installed gateway with manual login, the only credential-free option |

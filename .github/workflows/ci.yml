@@ -76,7 +76,12 @@ jobs:
             echo "::error::.env is tracked by git. Production configuration must live only on the server."
             exit 1
           fi
-          tracked=$(git ls-files | grep -E '^\.env($|\.)' | grep -v '^\.env\.example$' || true)
+          # Any *.example is a template and may be tracked; everything else
+          # matching .env* is real configuration and must not be. Matching the
+          # suffix rather than allowlisting one literal filename means adding a
+          # second template does not require editing this check -- which is how
+          # .env.ibgateway.example broke it.
+          tracked=$(git ls-files | grep -E '^\.env($|\.)' | grep -vE '\.example$' || true)
           if [ -n "$tracked" ]; then
             echo "::error::environment files are tracked: $tracked"
             exit 1
@@ -106,12 +111,52 @@ jobs:
           fi
           echo "OK: no broker credentials found."
 
-      - name: No IB Gateway or health ports may be published
+      - name: Credential keys in env templates must ship empty
         run: |
-          # A `ports:` mapping in compose is what would expose 4001/4002 or the
-          # health service to the internet.
-          if grep -nE '^\s*ports:' docker-compose.yml; then
-            echo "::error::docker-compose.yml publishes ports. Nothing in this service may be published."
+          # Templates are tracked, so any credential-shaped key in one is
+          # published. Checked across every tracked .env*.example rather than a
+          # named file, so a new template is covered the day it is added.
+          for f in $(git ls-files | grep -E '^\.env.*\.example$'); do
+            if grep -nE '^[[:space:]]*(TWS_USERID|TWS_PASSWORD|VNC_SERVER_PASSWORD|IB_USERNAME|IB_PASSWORD|IBKR_PASSWORD)[[:space:]]*=[[:space:]]*.+' "$f"; then
+              echo "::error::$f ships a credential value; it must be empty"
+              exit 1
+            fi
+          done
+          echo "OK: credential keys in env templates ship empty."
+
+      - name: No port may be published to a non-loopback interface
+        run: |
+          # This used to fail on ANY `ports:` mapping, which was a fine proxy
+          # while nothing published anything. The gateway service publishes VNC
+          # to 127.0.0.1 for manual intervention, so the check now tests the
+          # property that actually matters rather than its proxy.
+          port_lines=$(awk '
+            /^[[:space:]]*ports:[[:space:]]*$/ { inports=1; next }
+            inports && /^[[:space:]]*-[[:space:]]/ { print NR": "$0; next }
+            { inports=0 }
+          ' docker-compose.yml)
+
+          echo "port mappings found:"
+          echo "${port_lines:-  (none)}"
+
+          # Every mapping must bind an explicit loopback address. A mapping
+          # without one binds 0.0.0.0 and is reachable from the internet --
+          # and Docker's DNAT rules sit ahead of ufw, so the firewall would
+          # not save it.
+          bad=$(echo "$port_lines" | grep -vE '127\.0\.0\.1:' | grep -E '[0-9]' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::a port is published without a 127.0.0.1 bind address:"
+            echo "$bad"
+            exit 1
+          fi
+
+          # The IB Gateway API ports and the health service are never published,
+          # not even on loopback. Containers reach the gateway by service name
+          # across the private bridge.
+          api=$(echo "$port_lines" | grep -E '(400[1-4]|8787):' || true)
+          if [ -n "$api" ]; then
+            echo "::error::IB Gateway API or health ports must not be published at all:"
+            echo "$api"
             exit 1
           fi
           if grep -nE '(traefik|Host\(|websecure|entrypoints)' docker-compose.yml; then

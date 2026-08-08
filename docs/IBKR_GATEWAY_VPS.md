@@ -1,4 +1,14 @@
-# Running IB Gateway on the Hostinger VPS
+# Running IB Gateway on the Hostinger VPS (host install)
+
+> **Superseded by [`IBKR_GATEWAY_DOCKER.md`](IBKR_GATEWAY_DOCKER.md).** The
+> gateway now runs as a compose service with IBC handling login, on an operator
+> decision recorded in `SECURITY.md`. That trades a stored IBKR password for
+> unattended operation.
+>
+> Kept because it is the only way to run this **without storing a credential**,
+> and because two findings in it apply to any IB Gateway install: the API socket
+> binds `*:4002` regardless of the localhost-only checkbox, and `pgrep -f
+> ibgateway` also matches the VNC server.
 
 Steps for installing IB Gateway on `srv1792440.hstgr.cloud`, logging into it
 interactively over an SSH-tunnelled VNC session, and pointing the bot at it.
@@ -11,7 +21,7 @@ remains out of scope.
 | | |
 |---|---|
 | ✅ | IB Gateway runs on the VPS host, owned by a dedicated non-login user |
-| ✅ | Port 4002 binds to `127.0.0.1` and **cannot** be reached from the internet |
+| ✅ | Port 4002 is not reachable from the internet — enforced by ufw, **not** by the bind address; see below |
 | ✅ | You log in by hand, over an SSH tunnel, with a real login window |
 | ✅ | The bot connects with `IB_HOST` / port / `IB_CLIENT_ID` and nothing else |
 | ❌ | **No IBC, no login automation, no stored IBKR password** |
@@ -479,18 +489,164 @@ Two things to expect after this change:
 
 ## After a reboot
 
-Nothing here survives a reboot on its own, and that is the deliberate consequence
-of not installing login automation.
+The gateway does not survive a reboot, and that is the deliberate consequence of
+not installing login automation. Everything else does.
 
-1. `vncserver :1 -localhost yes -geometry 1440x900 -depth 24` as `ibgw`
-2. SSH tunnel from your Mac, connect VNC
-3. Launch IB Gateway, log in by hand
-4. Verify `ss -tlpn | grep 4002` shows `127.0.0.1:4002`
+### What survives, verified on a real reboot (2026-08-08)
 
-Meanwhile the bot is safe without intervention: the connection fails, the state
-goes `DISCONNECTED`, the transmit gate refuses on connection state before any
-other interlock is consulted, and reconnection backs off 2s → 300s and retries at
-that capped interval indefinitely. It does not hammer IBKR and it does not exit.
+| | |
+|---|---|
+| SSH, key-only | `sshd -T` still reports `passwordauthentication no` |
+| ufw, including the 4001/4002 denies | rules persist across boot |
+| The bot container | `restart: unless-stopped` brings it back **halted**, `APPROVED_POSTURE`, with no intervention |
+| Traefik and other containers | untouched |
+| **IB Gateway** | **gone** — needs a manual login |
+| **The VNC server** | **gone** — unless the systemd unit below is installed |
+
+Check the survivors before rebuilding anything on top of them. `sshd -T` rather
+than reading the config file: this project has had a setting that looked applied
+and was being overridden by a file loaded earlier.
+
+```bash
+sshd -T | grep -E 'permitrootlogin|passwordauthentication|kbdinteractiveauthentication'
+ufw status numbered
+cd /opt/sol-futures-trading-bot && docker compose ps && \
+  docker compose exec -T sol-trading-bot python -m app.cli verify
+ss -tlpn | grep -E ':4002|:5901' || echo "gateway and VNC down - expected"
+```
+
+### Bringing the gateway back
+
+Both the display and the gateway run as **systemd services** (see below). After a
+reboot they start themselves and the gateway comes back sitting at its login
+window. All you do is tunnel in and log in.
+
+```bash
+systemctl status vncserver@1 ibgateway --no-pager | head -20
+```
+
+If either is down: `systemctl restart vncserver@1 ibgateway`.
+
+Then from your Mac:
+
+```bash
+ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes \
+    -L 5901:127.0.0.1:5901 root@srv1792440.hstgr.cloud
+```
+
+```bash
+lsof -nP -iTCP:5901 -sTCP:LISTEN     # expect ssh on 127.0.0.1:5901
+```
+
+Finder → ⌘K → `vnc://localhost:5901`, then log in: **Paper Trading** tab, the
+**paper** username (the one beginning `D`, not your live/master username), no 2FA.
+
+Confirm, as root:
+
+```bash
+ss -tlpn | grep 4002                                          # expect *:4002 -- see 7a
+pgrep -u ibgw -f 'install4j.ibgateway.GWClient' | wc -l       # expect exactly 1
+```
+
+**Match the Java main class, never the bare string `ibgateway`.** Xtigervnc runs
+with `-auth /opt/ibgateway/.Xauthority` on its command line, so `pgrep -f
+ibgateway` matches the *display server* as well and reports 2 when one gateway is
+running. Worse, `pkill -u ibgw -f ibgateway` kills the VNC server — and a gateway
+launched afterwards against `DISPLAY=:1` then dies silently, because the display
+it was told to use no longer exists. That exact sequence cost an hour here.
+
+**Exactly one gateway.** Two instances fight over the same login: the second
+knocks out the first and bounces you back to the login screen after what looks
+like a successful sign-in. Same reason not to open Client Portal or the IBKR
+mobile app against this account while the gateway is up — that is error 10197,
+classified non-retryable so the bot never joins the fight.
+
+### Why systemd, and not a background job
+
+The first version of this procedure said to launch the gateway with `&`. It died
+twice in one evening, for two different reasons, and only one of them was
+understood at the time.
+
+The first death is unexplained. A plain `&` leaves the process attached to the
+SSH session's terminal, so `SIGHUP` on a dropped session is the obvious
+candidate, but the shell that owned the job was still alive afterwards — so that
+is a hypothesis, not a finding.
+
+The second death was self-inflicted, by a diagnostic in this very document:
+`pkill -u ibgw -f ibgateway` killed the *VNC server* alongside the gateway,
+because Xtigervnc carries `/opt/ibgateway/.Xauthority` on its command line. The
+gateway launched immediately afterwards was pointed at a display that no longer
+existed and exited without complaint. The lesson is narrow and worth keeping:
+**a process-matching pattern that also matches a home directory path is a
+loaded gun**, and the `pgrep`/`pkill` commands above now match the Java main
+class instead.
+
+Neither cause survives the fix, which is why the fix is worth having regardless
+of which explanation was right. A process holding a brokerage session for days
+should not live inside a login session at all. These units put both in
+`/system.slice`, independent of anyone being logged in, and start them at boot:
+
+```ini
+# /etc/systemd/system/vncserver@.service
+[Unit]
+Description=TigerVNC display for IB Gateway login (display only)
+After=network.target
+
+[Service]
+Type=forking
+User=ibgw
+ExecStartPre=-/usr/bin/vncserver -kill :%i
+ExecStart=/usr/bin/vncserver :%i -localhost yes -geometry 1440x900 -depth 24
+ExecStop=/usr/bin/vncserver -kill :%i
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/ibgateway.service
+[Unit]
+Description=IB Gateway (process only -- login is manual, over VNC)
+After=vncserver@1.service
+Requires=vncserver@1.service
+
+[Service]
+Type=simple
+User=ibgw
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=/opt/ibgateway/.Xauthority
+ExecStart=/bin/sh -c 'exec /opt/ibgateway/Jts/ibgateway/*/ibgateway'
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable --now vncserver@1 ibgateway
+```
+
+**These start processes. They do not log in.** No IBKR credential appears in
+either unit, nothing is stored on disk, and the login window still waits for a
+human. That boundary is the whole point: automating the *process* is operations,
+automating the *authentication* is the IBC decision, and only the first is done
+here.
+
+`StartLimitBurst=3` stops a genuinely broken gateway restart-looping forever.
+
+### Meanwhile the bot is safe without you
+
+The connection fails, the state goes `DISCONNECTED`, and the transmit gate
+refuses on connection state before any other interlock is consulted. Reconnection
+backs off 2s → 300s and retries at that capped interval indefinitely: it does not
+hammer IBKR and it does not exit. On reconnect it reconciles, and **if
+reconciliation fails the state becomes `SAFE` and stays there** until a human
+resolves the discrepancy.
 
 **Optional:** a systemd unit that brings the *display* up at boot, so you only
 have to tunnel in and log in rather than start the VNC server first. It starts
