@@ -726,12 +726,35 @@ In `.env.ibgateway` on the server:
 READ_ONLY_API=no
 ```
 
-Then recreate **both** containers, because the bot lives in the gateway's
-network namespace:
+Then bring the stack up. **`docker compose up -d` is enough** — changing
+`.env.ibgateway` changes the gateway's `env_file`, so compose recreates it on
+its own, and it recreates the bot with it:
 
 ```bash
-docker compose up -d --force-recreate
+docker compose up -d          # or: bash scripts/deploy.sh main
 ```
+
+Do **not** add `--force-recreate` on top of a deploy. `scripts/deploy.sh`
+already runs `docker compose up -d`, so a second recreate restarts a gateway
+that was seconds into logging in and resets its clock — which looks exactly
+like a broken gateway and is not one.
+
+**Now wait for the login.** IBC takes 30–60 seconds, and `deploy.sh` reports
+success before it finishes — it waits on the *bot's* container health, which
+says nothing about whether a broker session exists:
+
+```bash
+docker compose logs ib-gateway | grep -E "Login has completed|Read-Only API checkbox"
+```
+
+Want both lines. The second is the gateway reporting what it actually did:
+
+```
+IBC: Read-Only API checkbox is now set to: false
+```
+
+Running the checkout before that appears gives `502 Couldn't connect to TWS`,
+which reads as a networking fault and is only impatience.
 
 **This does not enable trading, and it is not step 10 arriving early.** It
 removes the outermost of four independent layers; the bot's own three are
@@ -759,8 +782,15 @@ docker compose exec -T -e TRADING_MODE=paper sol-trading-bot \
 ```
 
 `OPEN_ORDERS_EMPTY` should now pass, and the checkout should be **13/13**. If it
-still reports 321, the gateway did not pick up the change — check that both
-containers were recreated, not just restarted.
+still reports 321, the gateway did not pick up the change — confirm the
+`Read-Only API checkbox is now set to: false` line is present in its log.
+
+**Confirmed 2026-08-19**: 13/13, `OPEN_ORDERS_EMPTY` passing, and
+`GATE_REFUSES_WHEN_EVERYTHING_ELSE_IS_GREEN` still refusing with all four
+reasons. That last one earns its keep here specifically: on every earlier run
+the gateway would have blocked an order regardless, so the probe was partly
+free. This was the first run where the gateway *would* have accepted one and
+the bot's own three layers were the only thing in the way.
 
 ### 9b. Read-only soak
 
