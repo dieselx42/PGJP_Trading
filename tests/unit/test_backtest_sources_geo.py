@@ -24,8 +24,10 @@ interprets a response is covered; one `urlopen` per source is not.
 from __future__ import annotations
 
 import json
+import urllib.error
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from email.message import Message
 from typing import Any, ClassVar
 
 import pytest
@@ -39,6 +41,15 @@ from app.backtest.sources import (
 )
 
 T0 = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+
+
+def _no_sleep(_seconds: float) -> None:
+    """Tests must not spend wall-clock time in the request throttle.
+
+    The throttle is real in production and paces ~1,752 pages over a year of
+    1-minute bars. Left in place here, one pagination test alone would sleep
+    for four minutes.
+    """
 
 
 class _Response:
@@ -140,7 +151,7 @@ class TestCoinbasePagination:
         fed backwards would compute an equity curve that runs in reverse.
         """
         opener = _opener([[_candle(2), _candle(1), _candle(0)]])
-        source = CoinbaseBarSource(opener=opener)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
 
         bars = list(
             source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=3))
@@ -151,7 +162,7 @@ class TestCoinbasePagination:
     def test_the_request_window_is_capped_at_the_page_limit(self) -> None:
         """Coinbase rejects a wider window outright rather than truncating it."""
         opener = _opener([])
-        source = CoinbaseBarSource(opener=opener)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
 
         list(source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(days=1)))
 
@@ -171,7 +182,7 @@ class TestCoinbasePagination:
         look like a complete import.
         """
         opener = _opener([[], [_candle(301)]])
-        source = CoinbaseBarSource(opener=opener)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
 
         bars = list(
             source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=600))
@@ -182,7 +193,7 @@ class TestCoinbasePagination:
 
     def test_bars_past_the_end_are_not_returned(self) -> None:
         opener = _opener([[_candle(0), _candle(1), _candle(2)]])
-        source = CoinbaseBarSource(opener=opener)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
 
         bars = list(
             source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=2))
@@ -193,7 +204,7 @@ class TestCoinbasePagination:
     def test_bars_before_the_cursor_are_not_returned(self) -> None:
         """Coinbase pads a window to the granularity boundary."""
         opener = _opener([[_candle(-2), _candle(0), _candle(1)]])
-        source = CoinbaseBarSource(opener=opener)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
 
         bars = list(
             source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=3))
@@ -204,7 +215,7 @@ class TestCoinbasePagination:
     @pytest.mark.safety
     def test_a_walk_terminates_rather_than_hammering_the_endpoint(self) -> None:
         opener = _opener([])
-        source = CoinbaseBarSource(opener=opener)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
 
         list(source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(days=365)))
 
@@ -214,7 +225,7 @@ class TestCoinbasePagination:
     def test_a_message_payload_is_reported_as_a_refusal(self) -> None:
         """Coinbase answers a bad product id with 200 and a JSON message."""
         opener = _opener([{"message": "NotFound"}])
-        source = CoinbaseBarSource(opener=opener)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
 
         with pytest.raises(HistoricalSourceError, match="NotFound"):
             list(
@@ -224,7 +235,7 @@ class TestCoinbasePagination:
             )
 
     def test_an_unsupported_interval_is_refused(self) -> None:
-        source = CoinbaseBarSource(opener=_opener([]))
+        source = CoinbaseBarSource(opener=_opener([]), sleeper=_no_sleep)
         with pytest.raises(HistoricalSourceError, match="unsupported interval"):
             list(
                 source.fetch(
@@ -234,7 +245,7 @@ class TestCoinbasePagination:
 
     def test_the_url_carries_the_product_and_granularity(self) -> None:
         opener = _opener([])
-        source = CoinbaseBarSource(opener=opener)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
 
         list(source.fetch(symbol="SOL-USD", interval="1h", start=T0, end=T0 + timedelta(hours=2)))
 
@@ -256,7 +267,7 @@ class TestBinanceUnitedStates:
         specifically to prevent that.
         """
         opener = _opener([[[int(T0.timestamp() * 1000), "80", "81", "79", "80.5", "10"]]])
-        source = BinanceBarSource.united_states(opener=opener)
+        source = BinanceBarSource.united_states(opener=opener, sleeper=_no_sleep)
 
         [bar] = list(
             source.fetch(symbol="SOLUSD", interval="1m", start=T0, end=T0 + timedelta(minutes=1))
@@ -287,6 +298,132 @@ class TestBinanceUnitedStates:
     def test_the_global_source_keeps_its_name(self) -> None:
         assert BinanceBarSource().name == "binance"
         assert BinanceBarSource().base_url == "https://api.binance.com"
+
+
+class TestRateLimiting:
+    """A year of 1-minute bars is ~1,752 Coinbase pages.
+
+    Issued back to back that is a burst no public endpoint should have to
+    absorb, and the reply is HTTP 429 partway through a long import. Both
+    halves matter: pace the requests, and cope when the answer is still "slow
+    down".
+    """
+
+    def _failing_opener(self, statuses: list[int], payload: Any = None) -> Any:
+        """Returns the given statuses in order, then succeeds."""
+        attempts: list[int] = []
+
+        def opener(request: Any, timeout: float = 0) -> _Response:
+            attempts.append(len(attempts))
+            if statuses:
+                code = statuses.pop(0)
+                raise urllib.error.HTTPError(
+                    getattr(request, "full_url", ""), code, "nope", Message(), None
+                )
+            return _Response(json.dumps(payload if payload is not None else []).encode())
+
+        opener.attempts = attempts  # type: ignore[attr-defined]
+        return opener
+
+    def test_a_429_is_retried_rather_than_failing_the_import(self) -> None:
+        slept: list[float] = []
+        opener = self._failing_opener([429, 429], payload=[_candle(0)])
+        source = CoinbaseBarSource(opener=opener, sleeper=slept.append)
+
+        bars = list(
+            source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=1))
+        )
+
+        assert [b.opened_at.minute for b in bars] == [0]
+        assert len(opener.attempts) == 3, "two refusals, then the success"
+        assert slept, "it waited rather than retrying immediately"
+
+    def test_backoff_grows_between_attempts(self) -> None:
+        slept: list[float] = []
+        opener = self._failing_opener([429, 429, 429])
+        source = CoinbaseBarSource(opener=opener, sleeper=slept.append)
+
+        list(source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=1)))
+
+        backoffs = [s for s in slept if s >= 1]
+        assert backoffs == sorted(backoffs), "each wait is at least as long as the last"
+
+    @pytest.mark.safety
+    def test_a_geo_block_is_not_retried(self) -> None:
+        """451 is a jurisdiction decision. Retrying it is just hammering.
+
+        This is the status the deployed server actually gets from
+        `api.binance.com`, and no amount of waiting changes it.
+        """
+        opener = self._failing_opener([451, 451, 451, 451, 451, 451, 451])
+        source = BinanceBarSource(opener=opener, sleeper=_no_sleep)
+
+        with pytest.raises(HistoricalSourceError, match="could not reach"):
+            list(
+                source.fetch(
+                    symbol="SOLUSDT", interval="1m", start=T0, end=T0 + timedelta(minutes=1)
+                )
+            )
+
+        assert len(opener.attempts) == 1, "asked once, told no, stopped"
+
+    @pytest.mark.safety
+    def test_a_403_is_not_retried_either(self) -> None:
+        opener = self._failing_opener([403] * 8)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
+
+        with pytest.raises(HistoricalSourceError):
+            list(
+                source.fetch(
+                    symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=1)
+                )
+            )
+
+        assert len(opener.attempts) == 1
+
+    def test_it_gives_up_rather_than_retrying_forever(self) -> None:
+        opener = self._failing_opener([503] * 20)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
+
+        with pytest.raises(HistoricalSourceError):
+            list(
+                source.fetch(
+                    symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=1)
+                )
+            )
+
+        assert len(opener.attempts) == 6, "the initial attempt plus five retries"
+
+    def test_a_retry_after_header_is_honoured_over_the_guess(self) -> None:
+        """The endpoint saying how long it wants beats us guessing."""
+        slept: list[float] = []
+        headers = Message()
+        headers["Retry-After"] = "7"
+
+        def opener(request: Any, timeout: float = 0) -> _Response:
+            if not slept:
+                raise urllib.error.HTTPError("", 429, "slow down", headers, None)
+            return _Response(b"[]")
+
+        source = CoinbaseBarSource(opener=opener, sleeper=slept.append)
+        list(source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=1)))
+
+        assert 7.0 in slept
+
+    def test_requests_are_paced_apart(self) -> None:
+        slept: list[float] = []
+        opener = _opener([[_candle(0)], [_candle(301)]])
+        source = CoinbaseBarSource(
+            opener=opener, min_request_interval_seconds=0.5, sleeper=slept.append
+        )
+
+        list(
+            source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=600))
+        )
+
+        assert len(opener.calls) == 2
+        assert slept, "the second request waited for the first"
+        assert max(slept) <= 0.5
 
 
 class TestSeriesLiquidityIsVisibleBeforeReplaying:
@@ -370,7 +507,7 @@ class TestRequestsIdentifyThemselves:
 
     def test_coinbase_requests_carry_a_user_agent(self) -> None:
         opener = _opener([])
-        source = CoinbaseBarSource(opener=opener)
+        source = CoinbaseBarSource(opener=opener, sleeper=_no_sleep)
 
         list(source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=1)))
 
@@ -380,7 +517,7 @@ class TestRequestsIdentifyThemselves:
 
     def test_binance_requests_carry_one_too(self) -> None:
         opener = _opener([])
-        source = BinanceBarSource(opener=opener)
+        source = BinanceBarSource(opener=opener, sleeper=_no_sleep)
 
         list(source.fetch(symbol="SOLUSDT", interval="1m", start=T0, end=T0 + timedelta(minutes=1)))
 

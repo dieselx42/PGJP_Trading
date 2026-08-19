@@ -36,6 +36,7 @@ one that is missing.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator, Sequence
@@ -64,12 +65,90 @@ _COINBASE_PAGE_LIMIT: Final = 300
 _USER_AGENT: Final = "sol-futures-trading-bot/0.1 (historical bar import)"
 
 
-def _get(opener: Any, url: str, *, timeout: float) -> bytes:
-    """One GET, with a request object so headers can be attached."""
-    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310
-    with opener(request, timeout=timeout) as response:
-        body = response.read()
-    return bytes(body)
+#: Statuses worth trying again. Everything else is permanent and retrying it
+#: is just hammering someone's endpoint: 451 is a jurisdiction block, 403 an
+#: access decision, 400 a request this code got wrong. None improve with time.
+_RETRYABLE_STATUS: Final[frozenset[int]] = frozenset({429, 500, 502, 503, 504})
+
+#: Cap on the exponential backoff, so a long import cannot stall for hours on
+#: one bad page.
+_MAX_BACKOFF_SECONDS: Final = 30.0
+
+
+class _Throttle:
+    """Minimum spacing between requests, measured on a monotonic clock.
+
+    A year of 1-minute bars is ~1,752 Coinbase pages. Issued back to back
+    that is a burst no public endpoint should have to absorb, and the reply is
+    HTTP 429 partway through a twenty-minute import.
+    """
+
+    def __init__(self, min_interval_seconds: float, sleeper: Any = None) -> None:
+        self._interval = min_interval_seconds
+        self._sleep = sleeper or time.sleep
+        self._last: float | None = None
+
+    def wait(self) -> None:
+        if self._interval <= 0:
+            return
+        now = time.monotonic()
+        if self._last is not None:
+            remaining = self._interval - (now - self._last)
+            if remaining > 0:
+                self._sleep(remaining)
+        self._last = time.monotonic()
+
+    def backoff(self, seconds: float) -> None:
+        self._sleep(seconds)
+
+
+def _retry_after(exc: urllib.error.HTTPError, attempt: int) -> float:
+    """How long to wait, preferring what the server asked for.
+
+    A `Retry-After` is the endpoint telling us exactly how long it wants; the
+    exponential fallback is a guess for when it does not say.
+    """
+    header = exc.headers.get("Retry-After") if exc.headers else None
+    if header:
+        try:
+            return min(float(header), _MAX_BACKOFF_SECONDS)
+        except ValueError:
+            pass  # a date-formatted Retry-After; fall through to the guess
+    return min(2.0**attempt, _MAX_BACKOFF_SECONDS)
+
+
+def _get(
+    opener: Any,
+    url: str,
+    *,
+    timeout: float,
+    throttle: _Throttle | None = None,
+    retries: int = 5,
+) -> bytes:
+    """One GET, throttled, retried on the statuses that are worth retrying."""
+    for attempt in range(retries + 1):
+        if throttle is not None:
+            throttle.wait()
+        request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310
+        try:
+            with opener(request, timeout=timeout) as response:
+                return bytes(response.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code not in _RETRYABLE_STATUS or attempt == retries:
+                raise
+            delay = _retry_after(exc, attempt)
+            _LOG.warning(
+                "endpoint asked us to slow down; backing off",
+                extra={
+                    "event": "bars.backoff",
+                    "status": exc.code,
+                    "attempt": attempt + 1,
+                    "of": retries,
+                    "sleeping_seconds": delay,
+                },
+            )
+            (throttle.backoff if throttle else time.sleep)(delay)
+    raise HistoricalSourceError(f"gave up on {url} after {retries} retries")
 
 
 #: Give up rather than hammer a public endpoint that is refusing. A year of
@@ -190,6 +269,8 @@ class BinanceBarSource:
         source_name: str = "binance",
         opener: Any = None,
         timeout_seconds: float = 30.0,
+        min_request_interval_seconds: float = 0.1,
+        sleeper: Any = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         # Shadows the class attribute. A different host is a different venue
@@ -202,6 +283,7 @@ class BinanceBarSource:
         # is the real thing; nothing here silently runs against a fake.
         self._opener = opener or urllib.request.urlopen
         self._timeout = timeout_seconds
+        self._throttle = _Throttle(min_request_interval_seconds, sleeper)
 
     @classmethod
     def united_states(cls, **kwargs: Any) -> BinanceBarSource:
@@ -255,7 +337,8 @@ class BinanceBarSource:
         )
         url = f"{self.base_url}/api/v3/klines?{params}"
         try:
-            payload = json.loads(_get(self._opener, url, timeout=self._timeout).decode("utf-8"))
+            raw = _get(self._opener, url, timeout=self._timeout, throttle=self._throttle)
+            payload = json.loads(raw.decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise HistoricalSourceError(f"could not reach {self.base_url}: {exc}") from exc
         except json.JSONDecodeError as exc:
@@ -308,10 +391,14 @@ class CoinbaseBarSource:
         base_url: str = "https://api.exchange.coinbase.com",
         opener: Any = None,
         timeout_seconds: float = 30.0,
+        min_request_interval_seconds: float = 0.15,
+        sleeper: Any = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._opener = opener or urllib.request.urlopen
         self._timeout = timeout_seconds
+        # ~6.7 requests/second, under Coinbase's published public limit of 10.
+        self._throttle = _Throttle(min_request_interval_seconds, sleeper)
 
     def fetch(self, *, symbol: str, interval: str, start: datetime, end: datetime) -> Iterator[Bar]:
         ensure_utc(start)
@@ -356,7 +443,8 @@ class CoinbaseBarSource:
         )
         url = f"{self.base_url}/products/{symbol}/candles?{params}"
         try:
-            payload = json.loads(_get(self._opener, url, timeout=self._timeout).decode("utf-8"))
+            raw = _get(self._opener, url, timeout=self._timeout, throttle=self._throttle)
+            payload = json.loads(raw.decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise HistoricalSourceError(f"could not reach {self.base_url}: {exc}") from exc
         except json.JSONDecodeError as exc:

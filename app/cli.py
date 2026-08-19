@@ -49,6 +49,11 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CONFIG = 2
 
+#: Bars written per transaction during an import. Large enough that a year is
+#: not thousands of round trips, small enough that memory stays flat and a
+#: failure late in a long import does not discard everything before it.
+_BARS_BATCH_SIZE = 5000
+
 
 def _emit(payload: object) -> None:
     print(json.dumps(payload, default=str, indent=2))
@@ -543,6 +548,7 @@ def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
     """
     from datetime import timedelta  # noqa: PLC0415
 
+    from app.backtest.models import Bar  # noqa: PLC0415
     from app.backtest.sources import (  # noqa: PLC0415
         BinanceBarSource,
         CoinbaseBarSource,
@@ -585,25 +591,45 @@ def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
     try:
         database.migrate()
         repo = BarRepository(database)
-        fetched: list[object] = []
+        # Written in batches rather than accumulated. A year of 1-minute bars
+        # is ~525,000 of them; holding all of it before the first write costs
+        # hundreds of megabytes and loses everything if page 1,700 fails.
+        # Inserts are idempotent, so a partial import is resumable by re-running.
+        batch: list[Bar] = []
+        sample: list[Bar] = []
+        fetched = 0
+        added = 0
         try:
             for bar in source.fetch(
                 symbol=args.symbol, interval=args.interval, start=start, end=end
             ):
-                fetched.append(bar)
-                if args.limit and len(fetched) >= args.limit:
+                batch.append(bar)
+                fetched += 1
+                if len(sample) < 3:
+                    sample.append(bar)
+                if len(batch) >= _BARS_BATCH_SIZE:
+                    added += repo.insert_many(batch)
+                    batch.clear()
+                if args.limit and fetched >= args.limit:
                     break
+            added += repo.insert_many(batch)
         except HistoricalSourceError as exc:
+            # Keep whatever arrived before the failure. Re-running resumes.
+            added += repo.insert_many(batch)
             _emit(
                 {
                     "result": "FETCH_FAILED",
                     "error": str(exc),
-                    "fetched_before_failure": len(fetched),
+                    "fetched_before_failure": fetched,
+                    "stored_before_failure": added,
+                    "detail": (
+                        "bars already fetched were kept; inserts are idempotent, so "
+                        "re-running the same command resumes rather than duplicating."
+                    ),
                 }
             )
             return EXIT_ERROR
 
-        added = repo.insert_many(fetched)  # type: ignore[arg-type]
         info = repo.info(source=_source_name(source), symbol=args.symbol, interval=args.interval)
         _emit(
             {
@@ -615,10 +641,10 @@ def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
                     "end": end.isoformat(),
                     "limit": args.limit,
                 },
-                "fetched": len(fetched),
+                "fetched": fetched,
                 "added": added,
-                "already_present": len(fetched) - added,
-                "sample": [b.describe() for b in fetched[:3]],  # type: ignore[attr-defined]
+                "already_present": fetched - added,
+                "sample": [b.describe() for b in sample],
                 "stored": info.describe(),
                 "note": (
                     "gaps are reported, never filled. A missing bar is a fact about the "

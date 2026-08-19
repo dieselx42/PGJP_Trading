@@ -34,6 +34,10 @@ from app.state.database import Database
 T0 = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
 
 
+def _no_sleep(_seconds: float) -> None:
+    """No wall-clock time in the request throttle. See the geo source tests."""
+
+
 def _bar(minute: int = 0, *, source: str = "binance", close: str = "80") -> Bar:
     return Bar(
         source=source,
@@ -302,7 +306,7 @@ class TestBinancePagination:
 
     def test_it_walks_forward_through_pages(self) -> None:
         opener = self._opener([[self._kline(0), self._kline(1)], [self._kline(2)], []])
-        source = BinanceBarSource(opener=opener)
+        source = BinanceBarSource(opener=opener, sleeper=_no_sleep)
         bars = list(
             source.fetch(symbol="SOLUSDT", interval="1m", start=T0, end=T0 + timedelta(minutes=10))
         )
@@ -312,7 +316,7 @@ class TestBinancePagination:
     def test_an_empty_page_ends_the_walk(self) -> None:
         """Without this it loops forever against a public endpoint."""
         opener = self._opener([[]])
-        source = BinanceBarSource(opener=opener)
+        source = BinanceBarSource(opener=opener, sleeper=_no_sleep)
         bars = list(
             source.fetch(symbol="SOLUSDT", interval="1m", start=T0, end=T0 + timedelta(days=365))
         )
@@ -341,7 +345,7 @@ class TestBinancePagination:
         def opener(url: str, timeout: float = 0) -> Repeating:
             return Repeating(payload)
 
-        source = BinanceBarSource(opener=opener)
+        source = BinanceBarSource(opener=opener, sleeper=_no_sleep)
         bars = list(
             source.fetch(symbol="SOLUSDT", interval="1m", start=T0, end=T0 + timedelta(minutes=3))
         )
@@ -351,7 +355,7 @@ class TestBinancePagination:
 
     def test_bars_past_the_end_are_not_returned(self) -> None:
         opener = self._opener([[self._kline(0), self._kline(1), self._kline(2)]])
-        source = BinanceBarSource(opener=opener)
+        source = BinanceBarSource(opener=opener, sleeper=_no_sleep)
         bars = list(
             source.fetch(symbol="SOLUSDT", interval="1m", start=T0, end=T0 + timedelta(minutes=2))
         )
@@ -368,7 +372,7 @@ class TestBinancePagination:
             def __exit__(self, *_: object) -> bool:
                 return False
 
-        source = BinanceBarSource(opener=lambda url, timeout=0: Bad())
+        source = BinanceBarSource(opener=lambda url, timeout=0: Bad(), sleeper=_no_sleep)
         with pytest.raises(HistoricalSourceError, match="invalid JSON"):
             list(
                 source.fetch(
