@@ -6,17 +6,31 @@ change how a backtest behaves.
 
 Verification status
 -------------------
-``CsvBarSource`` is fully tested. ``BinanceBarSource``'s **parsing** is fully
-tested against recorded response shapes; its **network call** is not, because
-the environment this was written in denies outbound access to
-``api.binance.com``.
+``CsvBarSource`` is fully tested. The HTTP sources' **parsing** is fully tested
+against recorded response shapes; their **network calls** are not, because the
+environment this was written in denies outbound access to every exchange host.
 
 That distinction is deliberate rather than an excuse. Everything that
-interprets a response is covered; what is unproven is one `urlopen` and the
-assumption that Binance's payload still looks the way it is documented. The
+interprets a response is covered; what is unproven is one `urlopen` per source
+and the assumption that each payload still looks the way it is documented. The
 first real fetch is the verification, which is why ``bars-import`` takes
 ``--limit`` and prints what it got: fetch ten bars, look at them, then fetch a
 year.
+
+Which source to use
+-------------------
+``api.binance.com`` answers a US-hosted server with **HTTP 451**, so the global
+Binance endpoint is unusable from this VPS. Two alternatives serve a full year
+of 1-minute history:
+
+* ``CoinbaseBarSource`` -- deeper SOL-USD book, 300 candles per request.
+* ``BinanceBarSource.united_states()`` -- same kline format, thinner book,
+  1000 klines per request.
+
+Kraken is deliberately absent: its OHLC endpoint returns only the most recent
+720 points at any interval, which is twelve hours of 1-minute data, not a year.
+A source that silently returns a fraction of what was asked for is worse than
+one that is missing.
 """
 
 from __future__ import annotations
@@ -38,8 +52,13 @@ _LOG = get_logger("backtest.sources")
 #: Binance returns at most this many klines per request.
 _BINANCE_PAGE_LIMIT: Final = 1000
 
-#: Give up rather than hammer a public endpoint that is refusing.
-_MAX_PAGES: Final = 2000
+#: Coinbase returns at most this many candles per request, and rejects a wider
+#: window outright rather than truncating it.
+_COINBASE_PAGE_LIMIT: Final = 300
+
+#: Give up rather than hammer a public endpoint that is refusing. A year of
+#: 1-minute bars is ~1,752 Coinbase pages, so this has to clear that.
+_MAX_PAGES: Final = 4000
 
 
 class HistoricalSourceError(RuntimeError):
@@ -152,14 +171,33 @@ class BinanceBarSource:
         self,
         *,
         base_url: str = "https://api.binance.com",
+        source_name: str = "binance",
         opener: Any = None,
         timeout_seconds: float = 30.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        # Shadows the class attribute. A different host is a different venue
+        # with different liquidity, so `binance-us` bars must not be stored
+        # under `binance`: `source` is part of the primary key, and merging two
+        # venues into one series would interleave prices that never traded
+        # together.
+        self.name = source_name
         # Injected so the parsing can be tested without a network. The default
         # is the real thing; nothing here silently runs against a fake.
         self._opener = opener or urllib.request.urlopen
         self._timeout = timeout_seconds
+
+    @classmethod
+    def united_states(cls, **kwargs: Any) -> BinanceBarSource:
+        """Binance.US, which serves requests `api.binance.com` answers with 451.
+
+        A US-hosted server is geo-blocked from the global endpoint. This is the
+        same kline format on a different host, and a genuinely different order
+        book -- thinner, so its bars are a weaker proxy, not an equivalent one.
+        """
+        kwargs.setdefault("base_url", "https://api.binance.us")
+        kwargs.setdefault("source_name", "binance-us")
+        return cls(**kwargs)
 
     def fetch(self, *, symbol: str, interval: str, start: datetime, end: datetime) -> Iterator[Bar]:
         ensure_utc(start)
@@ -181,7 +219,7 @@ class BinanceBarSource:
             if not rows:
                 return
             for row in rows:
-                bar = _bar_from_kline(row, symbol=symbol, interval=interval)
+                bar = _bar_from_kline(row, symbol=symbol, interval=interval, source=self.name)
                 if bar.opened_at >= end:
                     return
                 yield bar
@@ -216,6 +254,146 @@ class BinanceBarSource:
         return payload
 
 
+class CoinbaseBarSource:
+    """Coinbase Exchange candles.
+
+    Exists because a US-hosted server gets HTTP 451 from ``api.binance.com``.
+    Coinbase answers from the same jurisdictions it operates in, and its SOL-USD
+    book has real depth, which makes it the better proxy of the two available.
+
+    **Still not the instrument this system trades.** Bars carry
+    ``source="coinbase"``; `Bar.is_proxy` reports that and every result repeats
+    it.
+
+    Two differences from the Binance path, both of which have bitten people:
+
+    * The candle array is ``[time, low, high, open, close, volume]``. Note that
+      **low comes before high, and open comes after both** -- it is not OHLC
+      order. Getting this wrong produces bars that validate cleanly and are
+      silently wrong.
+    * At most 300 candles per response, returned **newest first**. Requesting a
+      window wider than 300 intervals is rejected outright rather than
+      truncated, so the window is capped before asking.
+    """
+
+    name = "coinbase"
+
+    #: Coinbase takes granularity in seconds, and accepts only these values.
+    _GRANULARITY: Final[dict[str, int]] = {
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "1h": 3600,
+        "1d": 86400,
+    }
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "https://api.exchange.coinbase.com",
+        opener: Any = None,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._opener = opener or urllib.request.urlopen
+        self._timeout = timeout_seconds
+
+    def fetch(self, *, symbol: str, interval: str, start: datetime, end: datetime) -> Iterator[Bar]:
+        ensure_utc(start)
+        ensure_utc(end)
+        if interval not in self._GRANULARITY:
+            raise HistoricalSourceError(f"unsupported interval {interval!r}")
+        step = timedelta(seconds=self._GRANULARITY[interval])
+        window = step * _COINBASE_PAGE_LIMIT
+
+        cursor = start
+        pages = 0
+        while cursor < end:
+            pages += 1
+            if pages > _MAX_PAGES:
+                raise HistoricalSourceError(
+                    f"stopped after {_MAX_PAGES} pages without reaching {end.isoformat()}; "
+                    "refusing to keep hammering a public endpoint"
+                )
+            page_end = min(cursor + window, end)
+            rows = self._page(symbol=symbol, interval=interval, start=cursor, end=page_end)
+            # Newest first from the API; a replay depends on time order, and
+            # sorting here means nothing downstream has to know that.
+            for row in sorted(rows, key=_coinbase_candle_time):
+                bar = _bar_from_coinbase_candle(row, symbol=symbol, interval=interval)
+                if bar.opened_at >= end:
+                    return
+                if bar.opened_at >= cursor:
+                    yield bar
+            # Advance by the whole window, not past the last row received. An
+            # empty page is a gap in Coinbase's history, not the end of it --
+            # stopping there would silently truncate the import at the first
+            # outage, and the result would look like a complete year.
+            cursor = page_end
+
+    def _page(
+        self, *, symbol: str, interval: str, start: datetime, end: datetime
+    ) -> list[list[Any]]:
+        params = (
+            f"granularity={self._GRANULARITY[interval]}"
+            f"&start={start.isoformat().replace('+00:00', 'Z')}"
+            f"&end={end.isoformat().replace('+00:00', 'Z')}"
+        )
+        url = f"{self.base_url}/products/{symbol}/candles?{params}"
+        try:
+            with self._opener(url, timeout=self._timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise HistoricalSourceError(f"could not reach {self.base_url}: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise HistoricalSourceError(f"{self.base_url} returned invalid JSON: {exc}") from exc
+        if isinstance(payload, dict) and "message" in payload:
+            # Coinbase reports a bad product id or window as 200 + {"message"}.
+            raise HistoricalSourceError(f"coinbase refused the request: {payload['message']}")
+        if not isinstance(payload, list):
+            raise HistoricalSourceError(f"expected a list of candles, got {type(payload).__name__}")
+        _LOG.info(
+            "fetched a page of candles",
+            extra={"event": "bars.page", "count": len(payload), "start": start.isoformat()},
+        )
+        return payload
+
+
+def _coinbase_candle_time(row: Sequence[Any]) -> datetime:
+    from datetime import UTC  # noqa: PLC0415
+
+    try:
+        return datetime.fromtimestamp(int(row[0]), tz=UTC)
+    except (IndexError, TypeError, ValueError) as exc:
+        raise HistoricalSourceError(f"candle has no usable time: {row!r}") from exc
+
+
+def _bar_from_coinbase_candle(row: Sequence[Any], *, symbol: str, interval: str) -> Bar:
+    """Coinbase candle -> Bar.
+
+    ``[time, low, high, open, close, volume]``. The indices below are NOT the
+    OHLC order used everywhere else in this file and are pinned by a test
+    against a recorded response: swapping high and low here produces bars that
+    pass validation and are wrong in a way nothing downstream can detect.
+    """
+    try:
+        return Bar(
+            source="coinbase",
+            symbol=symbol,
+            interval=interval,
+            opened_at=_coinbase_candle_time(row),
+            low=to_decimal(row[1], field="low"),
+            high=to_decimal(row[2], field="high"),
+            open=to_decimal(row[3], field="open"),
+            close=to_decimal(row[4], field="close"),
+            volume=to_decimal(row[5], field="volume"),
+        )
+    except IndexError as exc:
+        raise HistoricalSourceError(f"candle is too short: {row!r}") from exc
+    except BarError as exc:
+        raise HistoricalSourceError(f"candle is not a valid bar: {exc}") from exc
+
+
 def _kline_open_time(row: Sequence[Any]) -> datetime:
     from datetime import UTC  # noqa: PLC0415
 
@@ -225,7 +403,9 @@ def _kline_open_time(row: Sequence[Any]) -> datetime:
         raise HistoricalSourceError(f"kline has no usable open time: {row!r}") from exc
 
 
-def _bar_from_kline(row: Sequence[Any], *, symbol: str, interval: str) -> Bar:
+def _bar_from_kline(
+    row: Sequence[Any], *, symbol: str, interval: str, source: str = "binance"
+) -> Bar:
     """Binance kline -> Bar.
 
     Positional by necessity: the API returns an array, not an object. The
@@ -234,7 +414,7 @@ def _bar_from_kline(row: Sequence[Any], *, symbol: str, interval: str) -> Bar:
     """
     try:
         return Bar(
-            source="binance",
+            source=source,
             symbol=symbol,
             interval=interval,
             opened_at=_kline_open_time(row),
@@ -252,6 +432,7 @@ def _bar_from_kline(row: Sequence[Any], *, symbol: str, interval: str) -> Bar:
 
 __all__ = [
     "BinanceBarSource",
+    "CoinbaseBarSource",
     "CsvBarSource",
     "HistoricalSource",
     "HistoricalSourceError",

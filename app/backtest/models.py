@@ -24,11 +24,16 @@ from typing import Final
 
 from app.utilities.timeutils import ensure_utc
 
-#: Sources whose bars are NOT the instrument this system trades.
+#: The only sources that carry bars for the instrument this system actually
+#: trades. **Everything else is a proxy**, and that direction matters.
 #:
-#: Listed explicitly so a result can say so in words rather than leaving a
-#: reader to infer it from a source name they may not recognise.
-PROXY_SOURCES: Final[frozenset[str]] = frozenset({"binance", "coinbase", "kraken"})
+#: This started as the opposite -- a list of known proxy venues -- which meant
+#: any source name not on it was silently treated as real futures data and the
+#: result quietly dropped its "NOT CME FUTURES" warning. Adding a venue is
+#: exactly when that mistake gets made: `binance-us` is not `binance`. An
+#: allowlist of futures sources fails closed, so an unrecognised name is
+#: labelled a proxy and over-warns rather than under-warns.
+FUTURES_SOURCES: Final[frozenset[str]] = frozenset({"ibkr"})
 
 #: Interval name -> length. Used to detect gaps, never to invent a bar.
 INTERVAL_SECONDS: Final[dict[str, int]] = {
@@ -79,8 +84,12 @@ class Bar:
 
     @property
     def is_proxy(self) -> bool:
-        """True when this bar is not the instrument being traded."""
-        return self.source.lower() in PROXY_SOURCES
+        """True when this bar is not the instrument being traded.
+
+        An unrecognised source is a proxy. Over-warning costs a paragraph in a
+        report; under-warning lets a spot backtest be quoted as a futures one.
+        """
+        return self.source.lower() not in FUTURES_SOURCES
 
     @property
     def closed_at(self) -> datetime:
@@ -155,8 +164,8 @@ def to_decimal(value: object, *, field: str) -> Decimal:
 
 
 __all__ = [
+    "FUTURES_SOURCES",
     "INTERVAL_SECONDS",
-    "PROXY_SOURCES",
     "Bar",
     "BarError",
     "BarGap",

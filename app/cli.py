@@ -545,6 +545,7 @@ def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
 
     from app.backtest.sources import (  # noqa: PLC0415
         BinanceBarSource,
+        CoinbaseBarSource,
         CsvBarSource,
         HistoricalSourceError,
     )
@@ -573,6 +574,10 @@ def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
         except HistoricalSourceError as exc:
             _emit({"result": "INVALID_CSV_MAPPING", "error": str(exc)})
             return EXIT_ERROR
+    elif args.source == "coinbase":
+        source = CoinbaseBarSource()
+    elif args.source == "binance-us":
+        source = BinanceBarSource.united_states()
     else:
         source = BinanceBarSource()
 
@@ -950,9 +955,25 @@ def build_parser() -> argparse.ArgumentParser:
                 ),
             )
         if name == "bars-import":
-            sub.add_argument("--symbol", default="SOLUSDT")
+            sub.add_argument(
+                "--symbol",
+                default="SOLUSDT",
+                help=(
+                    "the venue's own symbol: SOLUSDT on binance, SOLUSD on binance-us, "
+                    "SOL-USD on coinbase. Stored as given, and part of the series key."
+                ),
+            )
             sub.add_argument("--interval", default="1m", choices=("1m", "5m", "15m", "1h", "1d"))
-            sub.add_argument("--source", default="binance", choices=("binance", "csv"))
+            sub.add_argument(
+                "--source",
+                default="binance",
+                choices=("binance", "binance-us", "coinbase", "csv"),
+                help=(
+                    "binance is geo-blocked (HTTP 451) from a US-hosted server; use "
+                    "coinbase or binance-us there. kraken is absent on purpose: it serves "
+                    "only the most recent 720 bars, which is 12 hours of 1-minute data."
+                ),
+            )
             sub.add_argument(
                 "--days", type=int, default=365, help="lookback when --start is absent"
             )
