@@ -291,7 +291,7 @@ def cmd_verify(config: Config, args: argparse.Namespace) -> int:
     checks themselves come back incomplete -- an unreadable result is a failure,
     never a pass.
     """
-    del args
+    posture = getattr(args, "posture", None) or "halted"
     database, repos = _open_database(config)
     try:
         kill_switch = KillSwitch(config_engaged=config.kill_switch, store=repos.state)
@@ -299,11 +299,28 @@ def cmd_verify(config: Config, args: argparse.Namespace) -> int:
     finally:
         database.close()
 
-    approved = posture_is_approved(checks)
     failures = failing_checks(checks)
+    if posture == "halted":
+        approved = posture_is_approved(checks)
+        result = "APPROVED_POSTURE" if approved else "POSTURE_NOT_APPROVED"
+    else:
+        # An armed system is EXPECTED to differ from the halted posture -- that
+        # is what arming means, and reporting those differences as failures says
+        # nothing. What must still hold is that nothing about it is live. Those
+        # two checks are asserted here exactly as they are under `halted`; the
+        # armed configuration's own invariants (limits set, freshness set) are
+        # verified against the .env by scripts/verify_safety.sh before the
+        # container starts.
+        must_hold = {"LIVE_TRADING_ENABLED", "CAN_TRANSMIT_LIVE_ORDERS"}
+        live_failures = tuple(c for c in failures if c.name in must_hold)
+        approved = not live_failures and config.trading_mode is not TradingMode.LIVE
+        failures = live_failures
+        result = "ARMED_AND_NOT_LIVE" if approved else "ARMED_BUT_LIVE_CHECKS_FAILED"
+
     _emit(
         {
-            "result": "APPROVED_POSTURE" if approved else "POSTURE_NOT_APPROVED",
+            "result": result,
+            "posture": posture,
             "source": "the configuration this running process parsed, not the .env file",
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
             "failures": [c.name for c in failures],
@@ -374,6 +391,85 @@ def cmd_ibkr_checkout(config: Config, args: argparse.Namespace) -> int:
 
     _emit({**payload, **build_info(config)})
     return EXIT_OK if payload.get("result") == "CHECKOUT_PASSED" else EXIT_ERROR
+
+
+async def _check_permission(config: Config, contract_month: str | None) -> dict[str, object]:
+    """Observe futures permission with a whatIf preview. Places no order."""
+    from app.broker.ibkr_broker import IBKRBroker  # noqa: PLC0415
+    from app.contracts.resolver import ContractResolver  # noqa: PLC0415
+    from app.safety.gate import expected_account_type  # noqa: PLC0415
+
+    port = config.ib_port
+    if port is None:
+        return {"result": "NO_BROKER", "detail": f"no IB port for mode {config.trading_mode.value}"}
+
+    broker = IBKRBroker(
+        host=config.ibkr.host,
+        port=port,
+        # The admin id, so this can never disconnect a running bot.
+        client_id=config.ibkr.admin_client_id,
+        connect_timeout_seconds=config.ibkr.connect_timeout_seconds,
+        expected_account_type=expected_account_type(config.trading_mode),
+    )
+    await broker.connect()
+    try:
+        month = contract_month or config.default_contract_month
+        if not month:
+            return {
+                "result": "NO_CONTRACT",
+                "detail": "pass --contract-month or set DEFAULT_CONTRACT_MONTH; "
+                "an expiration is never chosen implicitly",
+            }
+        contract = await ContractResolver(broker).resolve(
+            symbol=config.default_futures_symbol, contract_month=month
+        )
+        probe = await broker.probe_futures_permission(contract)
+        return {
+            "result": "PERMITTED" if probe.permitted else "NOT_PERMITTED",
+            "contract": {"local_symbol": contract.local_symbol, "con_id": contract.con_id},
+            "probe": probe.describe(),
+            "note": (
+                "observed with a whatIf preview: IBKR prices an order it would accept and "
+                "refuses one it would not. No order was placed."
+            ),
+        }
+    finally:
+        await broker.disconnect()
+
+
+def cmd_check_permission(config: Config, args: argparse.Namespace) -> int:
+    """Ask IBKR whether this account may trade the contract, by observation.
+
+    The TWS API exposes no permission flag, so `SOL_FUTURES_PERMISSION_READY` is
+    an operator declaration. This is how that declaration gets backed by
+    evidence rather than belief -- and it is the same check that would catch
+    permission being revoked, which no configuration variable ever would.
+
+    Places no order: see `IBKRBroker.probe_futures_permission`.
+    """
+    import asyncio  # noqa: PLC0415
+
+    from app.logging_config import configure_logging  # noqa: PLC0415
+
+    configure_logging(config, run_id="check-permission", log_to_file=False, stream=sys.stderr)
+
+    if config.trading_mode is TradingMode.LIVE:
+        _emit(
+            {
+                "result": "REFUSED_LIVE_MODE",
+                "detail": "this probe is not available in live mode",
+            }
+        )
+        return EXIT_ERROR
+
+    try:
+        payload = asyncio.run(_check_permission(config, args.contract_month))
+    except Exception as exc:  # noqa: BLE001 -- report, do not traceback at an operator
+        _emit({"result": "PROBE_ERROR", "error": str(exc), "error_class": type(exc).__name__})
+        return EXIT_ERROR
+
+    _emit({**payload, **build_info(config)})
+    return EXIT_OK if payload.get("result") == "PERMITTED" else EXIT_ERROR
 
 
 def cmd_place_order(config: Config, args: argparse.Namespace) -> int:
@@ -457,6 +553,7 @@ COMMANDS = {
     "verify": cmd_verify,
     "ibkr-checkout": cmd_ibkr_checkout,
     "place-order": cmd_place_order,
+    "check-permission": cmd_check_permission,
 }
 
 
@@ -510,7 +607,19 @@ def build_parser() -> argparse.ArgumentParser:
                     "sends nothing; the preview prints the value to pass here."
                 ),
             )
-        if name == "ibkr-checkout":
+        if name == "verify":
+            sub.add_argument(
+                "--posture",
+                choices=("halted", "paper-armed"),
+                default="halted",
+                help=(
+                    "which configuration to consider correct. Defaults to halted, so a "
+                    "check that says nothing gets the refusing answer. Under paper-armed, "
+                    "differences from the halted posture are expected; the live checks "
+                    "still must pass."
+                ),
+            )
+        if name in {"ibkr-checkout", "check-permission"}:
             sub.add_argument(
                 "--contract-month",
                 default=None,
