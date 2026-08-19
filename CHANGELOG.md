@@ -78,6 +78,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hash is of the archive already used to build the host virtualenv that first
   proved the adapter works against a live gateway.
 
+- **Backtesting, phase 1 — ingestion and storage.** A `bars` table (schema
+  version 2), `app/backtest/`, and `app.cli bars-import` / `bars-info`.
+
+  `source` is part of the primary key, not decoration. The price history
+  available today is Solana *spot* and this system trades CME futures — no
+  basis, no roll, no CME session breaks. Provenance travels on every bar and
+  `Bar.is_proxy` says so out loud, precisely so a run over spot data can never
+  later be read as a statement about futures.
+
+  **Gaps are reported, never filled.** A missing hour is a fact about the data;
+  an invented price is indistinguishable from a real one by the time it reaches
+  a strategy, and every number downstream of it is then wrong undetectably.
+
+  Import is idempotent on `(source, symbol, interval, opened_at)` with
+  `INSERT OR IGNORE` — a year of 1-minute data is hundreds of pages and any one
+  can fail, and a stored bar must never be rewritten under a backtest already
+  run against it.
+
+  The CSV loader **requires an explicit column mapping** and refuses to guess.
+  A CSV whose columns are inferred is one that silently loads high as low the
+  day somebody exports it differently.
+
+  Verification is uneven and the code says so: `CsvBarSource` is fully tested,
+  and `BinanceBarSource`'s parsing is tested against a recorded response shape
+  — the kline indices especially, since an off-by-one swaps high and low and
+  every bar stays structurally valid. Its **network call is unverified**: this
+  environment denies outbound access to `api.binance.com`. Hence `--limit`:
+  fetch ten bars on a new source, look at them, then fetch a year.
+
 - `app.cli place-order` and `app/execution/operator_order.py` — the only way a
   human can cause this system to send an order. The write path (`place_order`,
   `orderStatus`, `execDetails`, `commissionReport`) has never run, and arming a

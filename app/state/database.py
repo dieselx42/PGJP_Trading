@@ -40,7 +40,7 @@ from app.utilities.timeutils import utc_now
 
 _LOG = get_logger("state.database")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class DatabaseError(RuntimeError):
@@ -234,6 +234,35 @@ MIGRATIONS: tuple[Migration, ...] = (
                 value       TEXT NOT NULL,
                 updated_at  TEXT NOT NULL
             )
+            """,
+        ),
+    ),
+    Migration(
+        version=2,
+        name="historical_bars",
+        statements=(
+            # `source` is not decoration and not derivable. It is what stops a
+            # backtest run over Binance spot from later being read as a
+            # statement about CME futures. It is part of the primary key, so
+            # two sources for the same symbol and minute coexist rather than
+            # silently overwriting one another.
+            """
+            CREATE TABLE IF NOT EXISTS bars (
+                source     TEXT NOT NULL,
+                symbol     TEXT NOT NULL,
+                interval   TEXT NOT NULL,
+                opened_at  TEXT NOT NULL,
+                open       TEXT NOT NULL,
+                high       TEXT NOT NULL,
+                low        TEXT NOT NULL,
+                close      TEXT NOT NULL,
+                volume     TEXT NOT NULL DEFAULT '0',
+                PRIMARY KEY (source, symbol, interval, opened_at)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_bars_range
+                ON bars(source, symbol, interval, opened_at)
             """,
         ),
     ),
