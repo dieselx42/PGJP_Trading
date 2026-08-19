@@ -45,12 +45,22 @@ class NoOpStrategy(Strategy):
         return ()
 
 
+def _registry() -> dict[str, type[Strategy]]:
+    # Imported here rather than at module top: the ORB strategy imports Bar
+    # from app.backtest.models, and this module is imported by the live
+    # runtime's hot path.
+    from app.strategy.orb import SolOrbStrategy  # noqa: PLC0415
+
+    return {
+        NoOpStrategy.name: NoOpStrategy,
+        SolOrbStrategy.name: SolOrbStrategy,
+    }
+
+
 #: Strategy registry. Adding a strategy means adding it here; the runtime
 #: refuses to start with an unknown ``STRATEGY_NAME`` rather than silently
 #: falling back to a default.
-STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
-    NoOpStrategy.name: NoOpStrategy,
-}
+STRATEGY_REGISTRY: dict[str, type[Strategy]] = _registry()
 
 
 def build_strategy(name: str, *, enabled: bool = True) -> Strategy:

@@ -83,7 +83,7 @@ from app.risk.manager import RiskContext, RiskManager
 from app.safety.gate import REASON_RISK_NOT_APPROVED, GateContext, TransmitGate
 from app.signals.models import TradeIntent
 from app.signals.validator import SignalValidator
-from app.strategy.base import Strategy
+from app.strategy.base import BarStrategy, Strategy
 
 _LOG = get_logger("backtest.engine")
 
@@ -403,13 +403,25 @@ class BacktestEngine:
             # had already seen.
             for fill in self.broker.settle(bar, tradeable=tradeable):
                 book.apply(fill)
+                # The strategy learns what its intent actually cost BEFORE it
+                # sees this bar, exactly as live: the fill happened at this
+                # bar's open, the bar completes after it. A strategy that sets
+                # stops from its entry price needs the real one.
+                self.strategy.on_fill(side=fill.side, quantity=fill.quantity, price=fill.price)
 
             curve.append((bar.opened_at.isoformat(), book.equity(bar.close)))
             if not tradeable:
                 continue
             tradeable_bars += 1
 
-            for intent in self.strategy.handle_quote(self._quote(bar)):
+            # A bar strategy receives the bar itself: an opening range is a
+            # candle's high and low, which no stream of closes can carry.
+            intents = (
+                self.strategy.handle_bar(bar)
+                if isinstance(self.strategy, BarStrategy)
+                else self.strategy.handle_quote(self._quote(bar))
+            )
+            for intent in intents:
                 refusal = self._handle(intent, bar=bar, book=book, orders=orders_this_hour)
                 if refusal is not None:
                     refusals.append(refusal)

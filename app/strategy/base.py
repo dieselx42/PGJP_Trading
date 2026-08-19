@@ -1,22 +1,49 @@
-"""Strategy base class.
+"""Strategy base classes.
 
 Design constraints that later strategies must keep:
 
-* ``on_quote`` is pure with respect to the outside world. It may keep internal
-  state, but it performs no I/O and reaches no broker.
-* It returns intents. It cannot create orders.
-* It receives only :class:`~app.market_data.models.Quote`. Whether that quote
-  came from IBKR, the mock source, or a historical replay is invisible to it.
+* ``on_quote`` / ``on_bar`` are pure with respect to the outside world. They
+  may keep internal state, but they perform no I/O and reach no broker.
+* They return intents. They cannot create orders.
+* They receive only market data (:class:`~app.market_data.models.Quote` or
+  :class:`~app.backtest.models.Bar`) and fill notifications. Whether the data
+  came from IBKR, the mock source, or a historical replay is invisible.
+
+Two kinds of strategy
+---------------------
+:class:`Strategy` consumes quotes -- point-in-time bid/ask/last. The live
+runtime feeds these directly from broker ticks.
+
+:class:`BarStrategy` consumes OHLCV bars. A strategy defined on candle
+structure -- an opening range measured from a candle's high and low, a trailing
+stop that follows "the highest price reached" -- cannot be expressed honestly
+on closes alone: the range would be measured too narrow and the peak too low,
+each wrong in a different direction. **The live runtime does not support bar
+strategies yet** (it has no tick-to-bar builder) and refuses to start with one
+rather than silently feeding it nothing; the backtest engine supports them
+fully. This is deliberate: backtest first, wire live second.
+
+Fill feedback
+-------------
+``on_fill`` tells a strategy what its intent actually cost. A strategy that
+sets stops "$0.65 from the entry price" needs the *real* entry price -- the
+signal candle's close is where it decided, not where it filled. The default is
+a no-op so quote strategies that do not care are unaffected.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import Any
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 
+from app.enums import OrderSide
 from app.market_data.models import Quote
 from app.signals.models import TradeIntent
+
+if TYPE_CHECKING:
+    from app.backtest.models import Bar
 
 
 class Strategy(ABC):
@@ -63,6 +90,16 @@ class Strategy(ABC):
     def on_quote(self, quote: Quote) -> Sequence[TradeIntent]:
         """React to a quote. Return zero or more intents."""
 
+    def on_fill(self, *, side: OrderSide, quantity: int, price: Decimal) -> None:  # noqa: B027
+        """Notification that an order (traced back to this strategy) filled.
+
+        Deliberately a no-op default rather than abstract: a strategy that
+        computes levels from its entry price overrides this; one that only
+        expresses targets does not care and should not be forced to say so.
+        Never emits intents -- reacting to a fill happens on the next bar or
+        quote, with market data in hand.
+        """
+
     def describe(self) -> dict[str, object]:
         return {
             "name": self.name,
@@ -72,4 +109,36 @@ class Strategy(ABC):
         }
 
 
-__all__ = ["Strategy"]
+class BarStrategy(Strategy):
+    """A strategy defined on OHLCV bars rather than quotes.
+
+    Supported by the backtest engine. The live runtime refuses to start with
+    one until it has a tick-to-bar builder -- see the module docstring.
+    """
+
+    def handle_bar(self, bar: Bar) -> Sequence[TradeIntent]:
+        """Entry point used by the replay. Mirrors :meth:`handle_quote`."""
+        self._quotes_seen += 1
+        if not self._enabled:
+            return ()
+        return self.on_bar(bar)
+
+    @abstractmethod
+    def on_bar(self, bar: Bar) -> Sequence[TradeIntent]:
+        """React to a completed bar. Return zero or more intents."""
+
+    def on_quote(self, quote: Quote) -> Sequence[TradeIntent]:
+        """Bar strategies do not consume quotes.
+
+        Raises rather than returning () so a runtime that wrongly feeds one
+        quotes fails loudly on the first tick instead of silently never
+        trading -- a strategy that cannot see the market must not appear to be
+        watching it.
+        """
+        raise NotImplementedError(
+            f"{self.name} is a bar strategy; it cannot run on a quote feed. "
+            "The live runtime must refuse to start with it until a bar feed exists."
+        )
+
+
+__all__ = ["BarStrategy", "Strategy"]

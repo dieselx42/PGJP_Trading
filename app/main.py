@@ -64,7 +64,7 @@ from app.signals.validator import SignalValidator
 from app.state.database import Database
 from app.state.models import BotEvent, BrokerEvent, SignalRecord
 from app.state.repositories import Repositories
-from app.strategy.base import Strategy
+from app.strategy.base import BarStrategy, Strategy
 from app.strategy.noop import build_strategy
 from app.utilities.ids import new_correlation_id, new_run_id
 from app.utilities.timeutils import utc_now
@@ -168,6 +168,16 @@ class TradingApplication:
         self.strategy = build_strategy(
             self.config.strategy_name, enabled=self.config.strategy_enabled
         )
+        if isinstance(self.strategy, BarStrategy):
+            # The live runtime feeds strategies from broker ticks; it has no
+            # tick-to-bar builder yet. A bar strategy on a quote feed would
+            # either crash on the first tick or silently never trade -- so
+            # refuse to start at all, which is the honest failure. Backtest
+            # such strategies with `python -m app.cli backtest`.
+            raise ConfigError(
+                f"strategy {self.strategy.name!r} consumes bars, and the live runtime "
+                "has no bar feed yet. It can be backtested; it cannot run live."
+            )
         self.validator = SignalValidator(
             configured_symbol=self.config.default_futures_symbol,
             known_strategies=[self.strategy.name],
