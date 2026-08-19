@@ -287,6 +287,21 @@ async def _run(app: Any, request: OperatorOrderRequest) -> dict[str, object]:
     # not about our send call.
     status = await _await_broker_status(app, outcome)
 
+    # A fill changes the position. Re-reconcile so the fill is recorded and the
+    # book reflects it -- otherwise this command leaves the broker holding a
+    # position the system has no record of, which the NEXT reconcile reports as
+    # an unexplained discrepancy and refuses to trade through. Observed
+    # 2026-08-19: a filled operator order put the trading process into SAFE and
+    # left it unable to close the position it had just opened.
+    #
+    # Reconciling rather than writing the position here is deliberate: the
+    # ingestion logic lives in one place, and duplicating it is how the two
+    # copies come to disagree.
+    reconciled_after = None
+    if status is not None and status.filled_quantity > 0:
+        await app._reconcile()
+        reconciled_after = app.reconciliation.describe()
+
     return {
         "result": RESULT_SUBMITTED,
         "transmitted": bool(outcome is not None and outcome.order is not None),
@@ -295,6 +310,8 @@ async def _run(app: Any, request: OperatorOrderRequest) -> dict[str, object]:
         "outcome": None if outcome is None else outcome.describe(),
         "broker_status": None if status is None else status.describe(),
         "broker_status_note": _status_note(status),
+        "reconciliation_after_fill": reconciled_after,
+        "position_after": [p.describe() for p in app.position_book.all()],
     }
 
 

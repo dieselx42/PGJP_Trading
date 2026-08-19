@@ -162,6 +162,37 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had never returned a green result before that run — which is not the same
   thing as a probe that returns green, and is worth distinguishing.
 
+- **A fill never moved the position book, and the resulting discrepancy could
+  never clear.** Three things combined, found within minutes of the first fill
+  this system produced:
+
+  `place-order` recorded the order's status and stopped, so nothing applied the
+  execution to the book. `main._reconcile` adopted broker positions **only when
+  reconciliation succeeded** — and it could not succeed while they disagreed, so
+  a discrepancy was self-perpetuating. And `fills_to_position_deltas` existed in
+  `reconciliation.py` with no callers: `reconcile` counted fills into
+  `fills_seen` and drew no conclusion from them, having seen the exact `+1` that
+  explained the exact `+1` delta.
+
+  The effect was that **the system could open a position and then not close
+  it** — opening created the state that blocked closing.
+
+  Fills are now ingested before the comparison, deduplicated on the broker's own
+  execution ids so re-reading the same 24-hour window cannot double-count. The
+  distinction that matters is preserved: a position explained by a fill we
+  watched clears, and a position that appeared from nowhere still halts.
+
+- **Reconciliation ran once per connection and never again.** Everything it
+  exists to catch — a missed fill, a changed position, an order from another
+  client — could develop mid-session and stay invisible until the next
+  reconnect, which with `restart: unless-stopped` and a healthy gateway could be
+  days. Now on a timer (`RECONCILE_INTERVAL_SECONDS`, default 300).
+
+  Recovery is as automatic as the drop, because a `SAFE` that needs a restart to
+  clear is a `SAFE` nobody will trust. The first attempt at that recovery was
+  gated on `state is SAFE`, which never fires because `_reconcile` leaves the
+  state at `RECONCILING` — caught by the test written for it, not by review.
+
 - **`orderStatus` logged and returned.** `_IBSession.order_statuses` was
   declared and never written to, so every status update IBKR sent was thrown
   away. Nothing downstream could learn whether an order was accepted, rejected
