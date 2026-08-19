@@ -12,6 +12,7 @@ trade.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from app.logging_config import get_logger
 from app.market_data.models import Quote
@@ -63,14 +64,16 @@ def _registry() -> dict[str, type[Strategy]]:
 STRATEGY_REGISTRY: dict[str, type[Strategy]] = _registry()
 
 
-def build_strategy(name: str, *, enabled: bool = True) -> Strategy:
+def build_strategy(
+    name: str, *, enabled: bool = True, params: dict[str, Any] | None = None
+) -> Strategy:
     key = name.strip().lower()
     strategy_class = STRATEGY_REGISTRY.get(key)
     if strategy_class is None:
         raise KeyError(
             f"unknown strategy {name!r}; registered strategies: {sorted(STRATEGY_REGISTRY)}"
         )
-    return strategy_class(enabled=enabled)
+    return strategy_class(enabled=enabled, params=params)
 
 
 __all__ = ["STRATEGY_REGISTRY", "NoOpStrategy", "build_strategy"]

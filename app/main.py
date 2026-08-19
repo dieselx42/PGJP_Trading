@@ -21,8 +21,10 @@ import contextlib
 import signal
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from decimal import Decimal
 
+from app.backtest.models import Bar
 from app.broker.base import Broker
 from app.broker.mock_broker import MockBroker
 from app.broker.models import (
@@ -50,7 +52,9 @@ from app.logging_config import (
     get_logger,
     mask_account_id,
 )
+from app.market_data.bar_builder import BarBuilder
 from app.market_data.manager import MarketDataManager
+from app.market_data.models import Quote
 from app.monitoring.health import evaluate_health
 from app.monitoring.server import HealthServer
 from app.monitoring.status import build_info, safety_summary
@@ -70,6 +74,12 @@ from app.utilities.ids import new_correlation_id, new_run_id
 from app.utilities.timeutils import utc_now
 
 _LOG = get_logger("main")
+
+#: Ceiling on bars queued while fills are unavailable. Three hours of
+#: 1-minute bars; a broker that cannot report fills for that long is a
+#: disconnect in all but name, and replaying the backlog afterwards would
+#: act on a market that no longer exists.
+_MAX_PENDING_BARS = 180
 
 STATE_KEY_LAST_STATE = "last_application_state"
 STATE_KEY_LAST_RUN_ID = "last_run_id"
@@ -141,6 +151,16 @@ class TradingApplication:
         #: Monotonic deadline for the next periodic reconcile. See `_main_loop`.
         self._next_reconcile_at: float | None = None
 
+        #: Set at construction; used to tell fills this process caused from
+        #: fills that predate it. Only the former reach the strategy's
+        #: `on_fill` -- see `_ingest_fills`.
+        self._started_at = utc_now()
+        #: Present exactly when the strategy consumes bars. Built in startup.
+        self.bar_builder: BarBuilder | None = None
+        #: Bars completed but not yet fed to the strategy, because feeding one
+        #: requires a successful fills poll first. See `_tick`.
+        self._pending_bars: list[Bar] = []
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -165,18 +185,33 @@ class TradingApplication:
         )
         self.repositories.state.set_state(STATE_KEY_LAST_RUN_ID, self.run_id)
 
-        self.strategy = build_strategy(
-            self.config.strategy_name, enabled=self.config.strategy_enabled
-        )
+        strategy_params: dict[str, object] = {}
+        if self.config.strategy_position_contracts > 0:
+            strategy_params["position_contracts"] = self.config.strategy_position_contracts
+        try:
+            self.strategy = build_strategy(
+                self.config.strategy_name,
+                enabled=self.config.strategy_enabled,
+                params=strategy_params or None,
+            )
+        except ValueError as exc:
+            # e.g. a size override the strategy refuses. Starting anyway with
+            # the strategy's own default would silently trade 40x the size the
+            # operator asked for.
+            raise ConfigError(f"strategy configuration rejected: {exc}") from exc
         if isinstance(self.strategy, BarStrategy):
-            # The live runtime feeds strategies from broker ticks; it has no
-            # tick-to-bar builder yet. A bar strategy on a quote feed would
-            # either crash on the first tick or silently never trade -- so
-            # refuse to start at all, which is the honest failure. Backtest
-            # such strategies with `python -m app.cli backtest`.
-            raise ConfigError(
-                f"strategy {self.strategy.name!r} consumes bars, and the live runtime "
-                "has no bar feed yet. It can be backtested; it cannot run live."
+            # Bar strategies are fed from the tick-to-bar builder: quotes are
+            # sampled into 1-minute bars and only COMPLETED bars reach the
+            # strategy. The bars are sampled, not exchange-built -- highs and
+            # lows understate the true extremes; see app.market_data.bar_builder.
+            self.bar_builder = BarBuilder(interval="1m")
+            _LOG.info(
+                "live bar feed active",
+                extra={
+                    "event": "bar_feed.active",
+                    "strategy": self.strategy.name,
+                    "interval": "1m",
+                },
             )
         self.validator = SignalValidator(
             configured_symbol=self.config.default_futures_symbol,
@@ -481,6 +516,7 @@ class TradingApplication:
                 "broker and local state agree",
                 data=self.reconciliation.describe(),
             )
+            self._check_strategy_position_agrees()
         else:
             self._record_event(
                 "reconciliation.failed",
@@ -537,10 +573,89 @@ class TradingApplication:
         if self.kill_switch.engaged():
             if self.state is not ApplicationState.HALTED:
                 self._set_state(ApplicationState.HALTED)
+                # A bar spanning the halt is not a minute of market history the
+                # strategy was watching, and bars queued from before the halt
+                # describe a market it is no longer allowed to act on. Dropped,
+                # so resuming starts from a gap rather than a stale backlog.
+                if self.bar_builder is not None:
+                    self.bar_builder.clear()
+                    self._pending_bars.clear()
+            return
+
+        if self.bar_builder is not None:
+            await self._tick_bars(quotes)
             return
 
         for quote in quotes:
             intents = strategy.handle_quote(quote)
+            for intent in intents:
+                await self._handle_intent(intent)
+
+    async def _tick_bars(self, quotes: Sequence[Quote], *, now: datetime | None = None) -> None:
+        """Feed a bar strategy: quotes -> completed bars -> intents.
+
+        The backtest engine guarantees an ordering the strategy's whole state
+        machine is built on: **a fill is reported before the bar that follows
+        it**. An entry emitted on bar N fills at bar N+1's open; the strategy
+        hears about the fill, then sees bar N+1. Live, fills arrive from the
+        broker asynchronously and the periodic reconcile (minutes apart) is far
+        too slow to reproduce that -- the strategy would see the next bar while
+        still believing itself flat, conclude its entry was cancelled, and be
+        free to double up.
+
+        So the same guarantee is enforced here: before any completed bar is
+        fed, fills are polled and ingested. If the poll fails, the bars WAIT --
+        they are queued, not dropped and not fed out of order. A bar backlog
+        that outlives the disconnect logic's patience disables the strategy
+        rather than replaying a stale market at it.
+        """
+        builder = self.bar_builder
+        strategy = self.strategy
+        broker = self.broker
+        assert builder is not None and strategy is not None and broker is not None
+
+        for quote in quotes:
+            self._pending_bars.extend(builder.add(quote))
+        # `now` is injectable for the same reason every clock in this codebase
+        # is: bar completion is a statement about time, and a test that cannot
+        # control time can only assert what happened to be true when it ran.
+        self._pending_bars.extend(builder.flush(now if now is not None else utc_now()))
+
+        if not self._pending_bars:
+            return
+
+        if len(self._pending_bars) > _MAX_PENDING_BARS:
+            strategy.disable(
+                "bar backlog exceeded its bound while fills were unavailable; "
+                "refusing to replay a stale market"
+            )
+            self._record_event(
+                "strategy.disabled",
+                f"bar backlog exceeded {_MAX_PENDING_BARS}; strategy disabled",
+                level="ERROR",
+            )
+            self._pending_bars.clear()
+            return
+
+        try:
+            broker_fills = await broker.get_fills()
+        except BrokerError as exc:
+            _LOG.warning(
+                "fills unavailable; holding completed bars until they are",
+                extra={
+                    "event": "bar_feed.fills_unavailable",
+                    "pending_bars": len(self._pending_bars),
+                    "error": str(exc),
+                },
+            )
+            return
+        self._ingest_fills(broker_fills)
+
+        bars, self._pending_bars = self._pending_bars, []
+        for bar in bars:
+            if not isinstance(strategy, BarStrategy):  # pragma: no cover - typed by startup
+                return
+            intents = strategy.handle_bar(bar)
             for intent in intents:
                 await self._handle_intent(intent)
 
@@ -551,6 +666,12 @@ class TradingApplication:
         self.account = None
         if self.market_data is not None:
             self.market_data.clear()
+        if self.bar_builder is not None:
+            # A bar straddling the outage is not a minute of market history,
+            # and queued bars describe a market from before we lost sight of
+            # it. The gap this leaves is the honest record of the disconnect.
+            self.bar_builder.clear()
+            self._pending_bars.clear()
         self.contract = None
         _LOG.warning(
             "broker disconnected; entering SAFE state and refusing orders",
@@ -752,7 +873,86 @@ class TradingApplication:
                 at=broker_fill.executed_at,
             )
             applied.append(broker_fill)
+            self._notify_strategy_of_fill(broker_fill)
         return applied
+
+    def _check_strategy_position_agrees(self) -> None:
+        """Disable a strategy whose belief about its position is wrong.
+
+        Runs after every SUCCESSFUL reconciliation -- the moment the book is
+        known to match the broker. If the strategy's tracked position differs
+        from the book, its model of the world is wrong in the one dimension
+        that matters most, and every management decision it makes from here --
+        stops, trails, "am I free to enter" -- would be computed against a
+        fiction. The two known ways in: a restart while a trade was open (the
+        strategy's levels lived in memory), and a fill that predates this run.
+
+        Disabling does NOT flatten. An open position is the operator's to
+        close, with `place-order --target-position 0`, deliberately -- not
+        something software liquidates on its own the moment it is confused.
+        The disable is one-way for the process lifetime; restart after
+        flattening to re-arm.
+        """
+        strategy = self.strategy
+        if strategy is None or not strategy.enabled or self.contract is None:
+            return
+        book_position = self.position_book.quantity(self.contract.con_id)
+        if book_position == strategy.position:
+            return
+        reason = (
+            f"account holds {book_position} contract(s) but the strategy believes "
+            f"{strategy.position}; it cannot manage a position it did not open. "
+            "Flatten with place-order --target-position 0, then restart."
+        )
+        strategy.disable(reason)
+        _LOG.error(
+            "strategy disabled: position mismatch",
+            extra={
+                "event": "strategy.position_mismatch",
+                "book_position": book_position,
+                "strategy_position": strategy.position,
+            },
+        )
+        self._record_event("strategy.disabled", reason, level="ERROR")
+
+    def _notify_strategy_of_fill(self, broker_fill: BrokerFill) -> None:
+        """Tell the strategy what its order actually cost.
+
+        Three filters, each with a reason:
+
+        * **Contract match.** The strategy trades one instrument; fills on any
+          other conId are not its business.
+        * **Executed during this run.** A fill from before this process started
+          is a position the strategy did not open. Reconstructing trade state
+          from it -- entry price hours old, trail peak unknown -- would manage
+          a trade under levels looser than the operator ever approved. Such
+          fills still move the position book, and the resulting mismatch
+          between book and strategy is caught by the reconcile-time invariant,
+          which disables the strategy rather than letting it improvise.
+        * **New only.** Callers pass only newly recorded fills (execution-id
+          idempotency), so a fill is announced exactly once across restarts,
+          reconnects, and the 24-hour re-read window.
+        """
+        strategy = self.strategy
+        if strategy is None:
+            return
+        if self.contract is None or broker_fill.con_id != self.contract.con_id:
+            return
+        if broker_fill.executed_at < self._started_at:
+            _LOG.warning(
+                "fill predates this run; position book updated, strategy NOT notified",
+                extra={
+                    "event": "fill.predates_run",
+                    "execution_id": broker_fill.execution_id,
+                    "executed_at": broker_fill.executed_at.isoformat(),
+                },
+            )
+            return
+        strategy.on_fill(
+            side=broker_fill.side,
+            quantity=broker_fill.quantity,
+            price=broker_fill.price,
+        )
 
     def _broker_permission_ready(self) -> bool:
         """Broker-reported permission, with three distinct meanings.
@@ -901,6 +1101,11 @@ class TradingApplication:
             },
             "contract": self.contract.describe() if self.contract else None,
             "market_data": (market_data.status(contract_key).describe() if market_data else None),
+            "bar_feed": (
+                {**self.bar_builder.describe(), "pending_bars": len(self._pending_bars)}
+                if self.bar_builder is not None
+                else None
+            ),
             "portfolio": {
                 "positions_count": len(self.position_book),
                 "positions": self.position_book.describe(),

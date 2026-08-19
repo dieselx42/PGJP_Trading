@@ -490,11 +490,18 @@ class TestRegistryAndLiveRefusal:
             strategy.on_quote(quote)
 
     @pytest.mark.safety
-    def test_the_live_runtime_refuses_to_start_with_it(self, tmp_path) -> None:
-        """Backtest first, wire live second -- enforced, not aspirational."""
+    def test_the_live_runtime_starts_it_with_a_bar_feed_never_a_quote_feed(self, tmp_path) -> None:
+        """The startup refusal became a bar feed; the invariant survives it.
+
+        "Backtest first, wire live second" was enforced by refusing to start.
+        The wiring now exists, so starting is permitted -- but the invariant
+        underneath was never "don't run live"; it was "never feed a bar
+        strategy quotes". That is what must hold from now on: a bar strategy
+        gets a builder, and a quote strategy gets none.
+        """
         import asyncio
 
-        from app.config import Config, ConfigError
+        from app.config import Config
         from app.main import TradingApplication
         from tests.conftest import default_env
 
@@ -507,8 +514,32 @@ class TestRegistryAndLiveRefusal:
             )
         )
         app = TradingApplication(config)
+        asyncio.run(app.startup())
+        try:
+            assert isinstance(app.strategy, BarStrategy)
+            assert app.bar_builder is not None, "a bar strategy without a feed is blind"
+            assert app.bar_builder.interval == "1m"
+        finally:
+            asyncio.run(app.shutdown())
 
-        with pytest.raises(ConfigError, match="no bar feed"):
-            asyncio.run(app.startup())
+    def test_a_quote_strategy_gets_no_bar_builder(self, tmp_path) -> None:
+        import asyncio
 
-        app.database.close()
+        from app.config import Config
+        from app.main import TradingApplication
+        from tests.conftest import default_env
+
+        config = Config.from_env(
+            default_env(
+                STRATEGY_NAME="noop",
+                DATABASE_PATH=str(tmp_path / "t.db"),
+                LOG_DIR=str(tmp_path / "logs"),
+                HEALTH_PORT="0",
+            )
+        )
+        app = TradingApplication(config)
+        asyncio.run(app.startup())
+        try:
+            assert app.bar_builder is None
+        finally:
+            asyncio.run(app.shutdown())

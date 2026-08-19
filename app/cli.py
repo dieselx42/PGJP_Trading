@@ -773,10 +773,20 @@ def cmd_backtest(config: Config, args: argparse.Namespace) -> int:
         _emit({"result": "INVALID_FILL_MODEL", "detail": "costs cannot be negative"})
         return EXIT_ERROR
 
+    strategy_params: dict[str, object] = {}
+    if config.strategy_position_contracts > 0:
+        # The same override the live runtime honours, so a replay can be run at
+        # the size paper trading will actually use.
+        strategy_params["position_contracts"] = config.strategy_position_contracts
     try:
-        strategy = build_strategy(args.strategy or config.strategy_name)
+        strategy = build_strategy(
+            args.strategy or config.strategy_name, params=strategy_params or None
+        )
     except KeyError as exc:
         _emit({"result": "UNKNOWN_STRATEGY", "error": str(exc)})
+        return EXIT_ERROR
+    except ValueError as exc:
+        _emit({"result": "INVALID_STRATEGY_PARAMS", "error": str(exc)})
         return EXIT_ERROR
 
     limits = config.risk

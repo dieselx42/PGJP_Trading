@@ -51,14 +51,18 @@ Ambiguities resolved (and worth confirming against the document's author)
 
 This is a :class:`~app.strategy.base.BarStrategy`: the range is a candle's
 high and low and the trail follows the highest price REACHED, neither of which
-exists in a stream of closes. The live runtime refuses to run it until a
-tick-to-bar feed exists -- backtest first, wire live second.
+exists in a stream of closes. Live, it is fed by
+:class:`~app.market_data.bar_builder.BarBuilder`, whose bars are *sampled*
+from polled quotes -- the range measures slightly narrow and the trail's peak
+slightly low relative to exchange bars; see that module. Size can be
+overridden DOWN (never up) via ``STRATEGY_POSITION_CONTRACTS``, so first paper
+trades run at 1 contract before anything runs at the document's 40.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
@@ -133,6 +137,20 @@ class SolOrbStrategy(BarStrategy):
     def __init__(self, *, enabled: bool = True, params: dict[str, Any] | None = None) -> None:
         super().__init__(enabled=enabled, params=params)
         self._p = OrbParams()
+        size = (params or {}).get("position_contracts")
+        if size is not None:
+            # DOWN only. The document's 40 is the specification's size, and a
+            # smaller override exists for exactly one reason: first paper
+            # trades should prove execution mechanics at 1 contract before
+            # anything trades at 40. Scaling UP past the document would be a
+            # different strategy wearing this one's name, so it is refused.
+            size = int(size)
+            if not 1 <= size <= self._p.position_contracts:
+                raise ValueError(
+                    f"position_contracts override must be within "
+                    f"1..{self._p.position_contracts}, got {size}"
+                )
+            self._p = replace(self._p, position_contracts=size)
         self._session: _Session | None = None
         self._trade: _Trade | None = None
         self._position = 0
@@ -153,6 +171,11 @@ class SolOrbStrategy(BarStrategy):
             "exits_trail": 0,
             "exits_target": 0,
         }
+
+    @property
+    def position(self) -> int:
+        """Signed contracts this strategy believes it holds. See base class."""
+        return self._position
 
     # ------------------------------------------------------------------
     # Fill feedback: the ONLY place position and entry price come from
@@ -377,7 +400,14 @@ class SolOrbStrategy(BarStrategy):
             symbol="MSL",
             direction=direction,
             requested_position=target,
-            created_at=bar.opened_at,
+            # Stamped with the bar's CLOSE, because that is when the decision
+            # became possible -- a bar's high and close do not exist until the
+            # minute ends. Stamping the open would make every live intent
+            # arrive ~60 seconds old, and the validator's staleness limit is
+            # exactly 60 seconds: the system would sit armed and refuse every
+            # signal it ever generated, silently. The backtest never showed
+            # this because the replay validator has no staleness clock.
+            created_at=bar.closed_at,
             metadata={"bar_close": str(bar.close)},
         )
 

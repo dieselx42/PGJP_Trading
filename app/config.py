@@ -341,6 +341,12 @@ class Config:
     strategy_name: str = "noop"
     strategy_enabled: bool = True
 
+    #: Optional size override, in contracts. 0 means "not set": the strategy
+    #: uses its own specified size. This exists so first paper trades can run
+    #: at 1 contract; each strategy decides what overrides it will accept (the
+    #: ORB strategy refuses anything above its documented 40).
+    strategy_position_contracts: int = 0
+
     # -- storage ----------------------------------------------------------
     database_path: Path = Path("/app/data/trading.db")
     log_dir: Path = Path("/app/logs")
@@ -403,6 +409,7 @@ class Config:
             "MARKET_DATA_MAX_AGE_SECONDS": self.market_data_max_age_seconds,
             "STRATEGY_NAME": self.strategy_name,
             "STRATEGY_ENABLED": self.strategy_enabled,
+            "STRATEGY_POSITION_CONTRACTS": self.strategy_position_contracts,
             "DATABASE_PATH": str(self.database_path),
             "LOG_DIR": str(self.log_dir),
             "LOG_LEVEL": self.log_level,
@@ -473,6 +480,9 @@ class Config:
             ),
             strategy_name=parse_str(source, "STRATEGY_NAME", "noop").lower(),
             strategy_enabled=parse_bool(source, "STRATEGY_ENABLED", True),
+            strategy_position_contracts=parse_int(
+                source, "STRATEGY_POSITION_CONTRACTS", 0, minimum=0
+            ),
             database_path=Path(parse_str(source, "DATABASE_PATH", "/app/data/trading.db")),
             log_dir=Path(parse_str(source, "LOG_DIR", "/app/logs")),
             log_level=log_level,

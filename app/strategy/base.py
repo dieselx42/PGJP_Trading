@@ -18,10 +18,12 @@ runtime feeds these directly from broker ticks.
 structure -- an opening range measured from a candle's high and low, a trailing
 stop that follows "the highest price reached" -- cannot be expressed honestly
 on closes alone: the range would be measured too narrow and the peak too low,
-each wrong in a different direction. **The live runtime does not support bar
-strategies yet** (it has no tick-to-bar builder) and refuses to start with one
-rather than silently feeding it nothing; the backtest engine supports them
-fully. This is deliberate: backtest first, wire live second.
+each wrong in a different direction. The backtest engine feeds these from
+stored history; the live runtime feeds them from
+:class:`~app.market_data.bar_builder.BarBuilder`, which samples polled quotes
+into 1-minute bars (see that module for what sampling understates). A bar
+strategy still must never receive a raw quote -- :meth:`BarStrategy.on_quote`
+raises rather than pretending.
 
 Fill feedback
 -------------
@@ -100,6 +102,19 @@ class Strategy(ABC):
         quote, with market data in hand.
         """
 
+    @property
+    def position(self) -> int:
+        """Signed contracts this strategy believes it holds.
+
+        The runtime compares this against the reconciled broker position on
+        every successful reconciliation. A strategy that has lost track of the
+        book -- a restart mid-trade, a fill it never heard about -- must not
+        keep trading on a model of the world that is wrong, and the comparison
+        is only possible if the belief is inspectable. Strategies that do not
+        track position (``noop``) report 0, which is also what they hold.
+        """
+        return 0
+
     def describe(self) -> dict[str, object]:
         return {
             "name": self.name,
@@ -112,8 +127,8 @@ class Strategy(ABC):
 class BarStrategy(Strategy):
     """A strategy defined on OHLCV bars rather than quotes.
 
-    Supported by the backtest engine. The live runtime refuses to start with
-    one until it has a tick-to-bar builder -- see the module docstring.
+    Fed by the backtest engine from stored history, and by the live runtime
+    from the tick-to-bar builder -- see the module docstring.
     """
 
     def handle_bar(self, bar: Bar) -> Sequence[TradeIntent]:
@@ -137,7 +152,8 @@ class BarStrategy(Strategy):
         """
         raise NotImplementedError(
             f"{self.name} is a bar strategy; it cannot run on a quote feed. "
-            "The live runtime must refuse to start with it until a bar feed exists."
+            "The runtime must route quotes through the bar builder and feed "
+            "the completed bars to handle_bar."
         )
 
 
