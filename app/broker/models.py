@@ -313,6 +313,52 @@ class PlaceOrderResult:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderStatusUpdate:
+    """What IBKR's ``orderStatus`` callback actually carries.
+
+    Deliberately not a :class:`BrokerOrderSnapshot`: the callback reports no
+    contract, side or quantity, so building a snapshot from one would mean
+    inventing four fields. This carries exactly what was observed.
+
+    These used to be logged and thrown away -- ``orderStatus`` wrote a log line
+    and returned, so nothing could ever learn whether an order was accepted,
+    rejected or cancelled. An order was "submitted" on the strength of having
+    written bytes to a socket.
+    """
+
+    broker_order_id: str
+    status: OrderStatus
+    ib_status: str
+    filled_quantity: int = 0
+    remaining_quantity: int = 0
+    average_fill_price: Decimal | None = None
+    why_held: str = ""
+    received_at: str | None = None
+
+    @property
+    def is_terminal(self) -> bool:
+        """No further status is coming for this order."""
+        return self.status in {OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED}
+
+    @property
+    def is_working(self) -> bool:
+        """The broker has it and is holding it."""
+        return self.status in {OrderStatus.SUBMITTED, OrderStatus.ACKNOWLEDGED}
+
+    def describe(self) -> dict[str, object]:
+        return {
+            "broker_order_id": self.broker_order_id,
+            "status": self.status.value,
+            "ib_status": self.ib_status,
+            "filled_quantity": self.filled_quantity,
+            "remaining_quantity": self.remaining_quantity,
+            "average_fill_price": _opt_str(self.average_fill_price),
+            "why_held": self.why_held,
+            "received_at": self.received_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PermissionProbe:
     """What the broker said when asked to price an order it would never send.
 

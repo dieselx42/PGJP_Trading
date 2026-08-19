@@ -42,11 +42,11 @@ Requiring a value that only the system can tell you proves they looked.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from app.enums import Direction, OrderType, TradingMode
+from app.enums import Direction, OrderStatus, OrderType, TradingMode
 from app.logging_config import get_logger
 from app.signals.models import TradeIntent
 from app.signals.validator import SignalValidator
@@ -279,13 +279,69 @@ async def _run(app: Any, request: OperatorOrderRequest) -> dict[str, object]:
         intent, order_type=request.order_type, limit_price=request.limit_price
     )
 
+    # Wait to hear what the broker DID with it. Without this the command
+    # reported SUBMITTED on the strength of having written bytes to a socket,
+    # then disconnected 5ms later -- and on 2026-08-19 that meant reporting
+    # success for an order IBKR accepted and immediately cancelled, because the
+    # placing client had gone away. An order's fate is a fact about the broker,
+    # not about our send call.
+    status = await _await_broker_status(app, outcome)
+
     return {
         "result": RESULT_SUBMITTED,
         "transmitted": bool(outcome is not None and outcome.order is not None),
         "plan": plan,
         "approvals": approvals,
         "outcome": None if outcome is None else outcome.describe(),
+        "broker_status": None if status is None else status.describe(),
+        "broker_status_note": _status_note(status),
     }
+
+
+async def _await_broker_status(app: Any, outcome: Any) -> Any:
+    """Ask the broker what happened, if there is an order to ask about."""
+    broker_order_id = getattr(getattr(outcome, "order", None), "broker_order_id", None)
+    if broker_order_id is None or not hasattr(app.broker, "await_order_status"):
+        return None
+    status = await app.broker.await_order_status(broker_order_id)
+    if status is None:
+        return None
+
+    # Persist it. A durable record that stops at PENDING_SUBMIT forever is how
+    # reconciliation ends up reporting a discrepancy nobody can explain.
+    stored = app.repositories.orders.get_by_broker_order_id(broker_order_id)
+    if stored is not None:
+        app.repositories.orders.update(
+            replace(
+                stored,
+                status=status.status,
+                filled_quantity=status.filled_quantity,
+                average_fill_price=status.average_fill_price,
+                updated_at=utc_now(),
+            )
+        )
+    return status
+
+
+def _status_note(status: Any) -> str:
+    if status is None:
+        return (
+            "the broker sent no status within the wait. UNDETERMINED -- the order may well "
+            "be working. Check `open-orders` and the broker before assuming anything."
+        )
+    if status.status is OrderStatus.CANCELLED:
+        return (
+            "IBKR CANCELLED this order. A resting order placed by this command is cancelled "
+            "when the command exits, unless IB Gateway is configured to retain orders across "
+            "a client disconnect. Use a marketable price if you need it to survive."
+        )
+    if status.status is OrderStatus.REJECTED:
+        return "IBKR REJECTED this order. The reason is in the adapter's log on stderr."
+    if status.is_working:
+        return "the broker is holding this order."
+    if status.status is OrderStatus.FILLED:
+        return "filled."
+    return f"broker reports {status.status.value}."
 
 
 __all__ = [

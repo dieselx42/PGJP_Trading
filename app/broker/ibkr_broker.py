@@ -29,13 +29,19 @@ active: real-time bid/ask/last on MSLQ6 during liquid hours, with
 whole time -- see :meth:`IBKRBroker._await_first_tick` -- so this path had never
 run to completion before that date despite the code being months old.
 
-Still unverified: order placement, order-status callbacks, fills and commission
-reports. Those need ``ALLOW_ORDER_TRANSMIT=true`` and IB Gateway's Read-Only API
-mode off, which is RUNBOOK step 10 and a separate decision.
+**Order placement confirmed 2026-08-19.** The first order this system sent was
+accepted by IBKR (permId 2106979881) and then **cancelled**, because the ephemeral
+command that placed it disconnected five milliseconds later. IBKR reported both
+events; the adapter recorded neither, because ``orderStatus`` logged and
+returned. Both are fixed -- see :meth:`_IBSession.orderStatus` and
+:meth:`IBKRBroker.await_order_status`.
 
-Note that ``reqOpenOrders`` is refused outright while Read-Only API mode is on
-(code 321, ``reqId`` -1), so ``get_open_orders`` cannot be exercised in that
-configuration.
+The cancellation is not a defect in this code. A resting order placed by a
+short-lived client does not outlive that client unless IB Gateway is configured
+to retain orders across a disconnect. The trading process holds a persistent
+connection and is not affected; the operator command is.
+
+Still unverified: fills and commission reports. Nothing has filled yet.
 
 Account identity
 ----------------
@@ -75,6 +81,7 @@ from app.broker.models import (
     ConnectionInfo,
     MarketDataTick,
     OrderRequest,
+    OrderStatusUpdate,
     PermissionProbe,
     PlaceOrderResult,
 )
@@ -259,7 +266,9 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         self.managed_accounts_event = threading.Event()
         self.last_message_at: datetime | None = None
         self.connection_closed = threading.Event()
-        self.order_statuses: dict[str, BrokerOrderSnapshot] = {}
+        #: Latest status per broker order id, from the `orderStatus` callback.
+        #: Previously declared and never written to -- see `orderStatus`.
+        self.order_statuses: dict[str, OrderStatusUpdate] = {}
         self.ticks: dict[int, dict[str, Decimal]] = {}
         self.tick_request_contract: dict[int, str] = {}
         #: Request ids that have received at least one delayed tick.
@@ -507,18 +516,43 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         mktCapPrice: float = 0.0,
     ) -> None:
         self.last_message_at = utc_now()
+        # RECORD it, do not merely log it. This used to log and return, so
+        # nothing downstream could ever learn whether an order was accepted,
+        # rejected or cancelled -- an order counted as "submitted" purely
+        # because bytes had been written to a socket. Observed 2026-08-19:
+        # IBKR accepted an order (permId 2106979881) and cancelled it moments
+        # later when the placing client disconnected. It reported both. We
+        # recorded neither, and finding out took an hour of manual probing.
+        update = OrderStatusUpdate(
+            broker_order_id=str(orderId),
+            # An unmapped IBKR status is ERROR, not a guess at something benign.
+            status=IB_STATUS_MAP.get(status, OrderStatus.ERROR),
+            ib_status=status,
+            filled_quantity=_safe_int(filled),
+            remaining_quantity=_safe_int(remaining),
+            average_fill_price=_opt_decimal(avgFillPrice),
+            why_held=whyHeld or "",
+            received_at=utc_now().isoformat(),
+        )
+        with self._lock:
+            self.order_statuses[str(orderId)] = update
         _LOG.info(
             "ibkr order status",
             extra={
                 "event": "order.status",
                 "broker_order_id": str(orderId),
                 "ib_status": status,
+                "mapped_status": update.status.value,
                 "filled": str(filled),
                 "remaining": str(remaining),
                 "avg_fill_price": avgFillPrice,
                 "why_held": whyHeld,
             },
         )
+
+    def order_status(self, broker_order_id: str) -> OrderStatusUpdate | None:
+        with self._lock:
+            return self.order_statuses.get(broker_order_id)
 
     # executions
     def execDetails(self, reqId: int, contract: Any, execution: Any) -> None:
@@ -1156,6 +1190,32 @@ class IBKRBroker(Broker):
             status=OrderStatus.PENDING_SUBMIT,
         )
 
+    async def await_order_status(
+        self, broker_order_id: str, *, timeout_seconds: float = 5.0
+    ) -> OrderStatusUpdate | None:
+        """Wait for the broker to say what it did with an order.
+
+        ``place_order`` returning means bytes reached a socket. It does not mean
+        IBKR accepted the order, and the difference is not academic: on
+        2026-08-19 an order was accepted (permId 2106979881) and then cancelled
+        moments later because the placing client disconnected, and nothing in
+        this system noticed either event.
+
+        Returns ``None`` on timeout, which means *undetermined* -- the order may
+        well be working. Callers must not read it as "not placed".
+        """
+        session = self._require_session()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            update = session.order_status(broker_order_id)
+            if update is not None:
+                return update
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            await asyncio.sleep(min(_FIRST_TICK_POLL_SECONDS, remaining))
+
     async def modify_order(self, request: OrderRequest, broker_order_id: str) -> PlaceOrderResult:
         if not request.transmit:
             raise BrokerOrderRejectedError("refusing to modify an order with transmit=False")
@@ -1393,6 +1453,14 @@ def _from_ib_contract_details(details: Any) -> QualifiedContract:
             "contractMonth": str(getattr(details, "contractMonth", "")),
         },
     )
+
+
+def _safe_int(value: Any) -> int:
+    """ibapi sends Decimal quantities; a malformed one must not kill the callback."""
+    try:
+        return int(Decimal(str(value)))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
 
 
 def _opt_decimal(value: Any) -> Decimal | None:
