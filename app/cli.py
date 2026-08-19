@@ -12,6 +12,16 @@ restart, and the friction is the feature.
 
 Read-only commands work against the database, so they are safe to run while the
 bot is trading and do not need a broker connection.
+
+Two commands are not read-only, and both are deliberate:
+
+* ``cancel-all-orders`` reaches the broker and cancels working orders. It only
+  ever removes exposure.
+* ``place-order`` sends **one** order, and is the only command that can create
+  exposure. It cannot enable trading -- it requires a configuration that already
+  permits it, and every interlock applies exactly as it does to a strategy.
+  Without ``--confirm`` it previews and sends nothing. See
+  ``app/execution/operator_order.py``.
 """
 
 from __future__ import annotations
@@ -366,6 +376,63 @@ def cmd_ibkr_checkout(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK if payload.get("result") == "CHECKOUT_PASSED" else EXIT_ERROR
 
 
+def cmd_place_order(config: Config, args: argparse.Namespace) -> int:
+    """Send ONE operator order through the real pipeline.
+
+    The only command in this tool that can cause an order. It loosens nothing:
+    the kill switch, the transmit flag and every risk limit apply exactly as
+    they do to a strategy, and a refusal from either approver is reported
+    rather than worked around.
+
+    Without ``--confirm`` it previews and sends nothing. See
+    ``app/execution/operator_order.py`` for why the confirmation token is the
+    broker-reported local symbol rather than a bare flag.
+    """
+    import asyncio  # noqa: PLC0415
+    from decimal import Decimal, InvalidOperation  # noqa: PLC0415
+
+    from app.enums import OrderType  # noqa: PLC0415
+    from app.execution.operator_order import (  # noqa: PLC0415
+        OperatorOrderRequest,
+        place_operator_order,
+    )
+    from app.logging_config import configure_logging  # noqa: PLC0415
+
+    # Same reasoning as ibkr-checkout: the adapter's structured fields are the
+    # diagnosis, and stdout stays parseable.
+    configure_logging(config, run_id="operator-order", log_to_file=False, stream=sys.stderr)
+
+    limit_price: Decimal | None = None
+    if args.limit_price is not None:
+        try:
+            limit_price = Decimal(args.limit_price)
+        except (InvalidOperation, ValueError):
+            _emit({"result": "INVALID_LIMIT_PRICE", "value": args.limit_price})
+            return EXIT_ERROR
+
+    request = OperatorOrderRequest(
+        target_position=args.target_position,
+        order_type=OrderType.MARKET if args.order_type == "market" else OrderType.LIMIT,
+        limit_price=limit_price,
+        confirm=args.confirm,
+    )
+
+    try:
+        payload = asyncio.run(place_operator_order(config, request))
+    except Exception as exc:  # noqa: BLE001 -- report, do not traceback at an operator
+        _emit(
+            {
+                "result": "OPERATOR_ORDER_ERROR",
+                "error": str(exc),
+                "error_class": type(exc).__name__,
+            }
+        )
+        return EXIT_ERROR
+
+    _emit({**payload, **build_info(config)})
+    return EXIT_OK if payload.get("result") in {"SUBMITTED", "PREVIEW_ONLY"} else EXIT_ERROR
+
+
 def cmd_config(config: Config, args: argparse.Namespace) -> int:
     del args
     _emit({"config": config.redacted(), **build_info(config)})
@@ -389,6 +456,7 @@ COMMANDS = {
     "config": cmd_config,
     "verify": cmd_verify,
     "ibkr-checkout": cmd_ibkr_checkout,
+    "place-order": cmd_place_order,
 }
 
 
@@ -397,7 +465,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="solbot-admin",
         description=(
             "Operator commands for sol-futures-trading-bot. "
-            "No command in this tool can enable trading or clear the kill switch."
+            "No command in this tool can enable trading or clear the kill switch. "
+            "`place-order` can SEND one order, but only where the configuration "
+            "already permits it -- it loosens nothing and every interlock still applies."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -412,6 +482,33 @@ def build_parser() -> argparse.ArgumentParser:
                 "--confirm",
                 action="store_true",
                 help="required; cancels every working order at the broker",
+            )
+        if name == "place-order":
+            sub.add_argument(
+                "--target-position",
+                type=int,
+                required=True,
+                metavar="N",
+                help=(
+                    "ABSOLUTE target position in contracts, signed. Not a delta: 1 means "
+                    "'be long 1', and running it twice leaves you long 1, not 2. Use 0 to flatten."
+                ),
+            )
+            sub.add_argument(
+                "--order-type",
+                choices=("limit", "market"),
+                default="limit",
+                help="limit (default) -- a first order should not fill at a surprising price",
+            )
+            sub.add_argument("--limit-price", default=None, help="required for a limit order")
+            sub.add_argument(
+                "--confirm",
+                default=None,
+                metavar="LOCAL_SYMBOL",
+                help=(
+                    "the contract's broker-reported local symbol. Omit for a preview that "
+                    "sends nothing; the preview prints the value to pass here."
+                ),
             )
         if name == "ibkr-checkout":
             sub.add_argument(

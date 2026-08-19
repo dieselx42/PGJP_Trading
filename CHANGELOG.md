@@ -78,6 +78,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hash is of the archive already used to build the host virtualenv that first
   proved the adapter works against a live gateway.
 
+- `app.cli place-order` and `app/execution/operator_order.py` — the only way a
+  human can cause this system to send an order. The write path (`place_order`,
+  `orderStatus`, `execDetails`, `commissionReport`) has never run, and arming a
+  strategy to find out is the wrong first experiment: a strategy fires on a
+  market tick, at a moment nobody chose, with nobody watching. It is also
+  currently impossible, because `NoOpStrategy` returns no intents.
+
+  **It is not a bypass.** The order travels the identical path a strategy order
+  takes, by calling the same `_handle_intent` the tick loop calls. It sets no
+  configuration, clears no kill switch and raises no limit; every refusal the
+  gate or risk manager can produce, it produces here, and reports rather than
+  works around. Three tests read the source with `ast` and fail if it ever calls
+  a broker directly, constructs its own gate, or touches the kill switch.
+
+  Without `--confirm` it previews and sends nothing. The confirmation token is
+  the contract's broker-reported `local_symbol`, so it cannot be typed from
+  memory — only from a preview that actually resolved a contract at IBKR. A
+  `--yes` flag would prove the operator can type `--yes`; requiring a value only
+  the system can supply proves they looked. Live mode is refused before a
+  broker, database or application object is constructed.
+
+  Positions are absolute targets, not deltas, as everywhere else: running it
+  twice leaves you long 1, not 2.
+
 ### Changed
 
 - The IBKR adapter, `docs/IBKR_API_NOTES.md` and `app/contracts/solana.py` no
@@ -117,6 +141,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bid/ask/last on MSLQ6 during liquid hours, `is_delayed` false. `MARKET_DATA`
   had never returned a green result before that run — which is not the same
   thing as a probe that returns green, and is worth distinguishing.
+
+- The operator-order preview validated through the *same* `SignalValidator` the
+  pipeline then used. `validate()` records an intent id whenever it accepts —
+  that is what makes a replayed signal harmless — so the real submission was
+  refused as a duplicate of its own preview, and reported `SUBMITTED` with a
+  null outcome. Success-shaped silence, the worst possible form.
+
+  The preview now asks a separate validator: asking a question must not answer
+  it. Caught immediately by the one control test that proves the authorised
+  baseline *does* transmit, without which all fourteen refusal tests around it
+  would have passed against a command that could never send anything.
 
 ## [0.1.0] — 2026-08-07
 
