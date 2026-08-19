@@ -51,6 +51,99 @@ async def _local_symbol(config: Config) -> str:
     return str(contract["local_symbol"])
 
 
+class TestItRunsAlongsideTheTradingProcess:
+    """Regression: `place-order` runs beside the bot, not as it.
+
+    The first run against a deployed bot died with
+    ``[Errno 98] address already in use`` on the health port, because it built a
+    full `TradingApplication` and that starts a health server the trading
+    process already owns. Directly behind it sat a worse one: the same
+    `client_id` as the running bot, which IBKR resolves by disconnecting one of
+    them -- so placing an order would have knocked the bot off its broker
+    session.
+
+    Both are tested by effect. Asserting "the flag is set" would have passed on
+    the broken version too.
+    """
+
+    @staticmethod
+    def _free_port() -> int:
+        import socket
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        return int(port)
+
+    async def test_an_admin_instance_can_start_while_the_bot_holds_the_port(self) -> None:
+        from app.main import TradingApplication
+
+        port = str(self._free_port())
+        running = TradingApplication(_config(HEALTH_PORT=port))
+        await running.startup()
+        try:
+            # Same port, same config. This is the call that used to raise.
+            admin = TradingApplication(_config(HEALTH_PORT=port), is_admin_instance=True)
+            await admin.startup()
+            await admin.shutdown()
+        finally:
+            await running.shutdown()
+
+    async def test_two_admin_instances_do_not_collide_either(self) -> None:
+        from app.main import TradingApplication
+
+        port = str(self._free_port())
+        first = TradingApplication(_config(HEALTH_PORT=port), is_admin_instance=True)
+        second = TradingApplication(_config(HEALTH_PORT=port), is_admin_instance=True)
+        await first.startup()
+        await second.startup()
+        await second.shutdown()
+        await first.shutdown()
+
+    def test_an_admin_instance_uses_the_admin_client_id(self) -> None:
+        """IBKR disconnects the loser when two clients share an id."""
+        from app.main import TradingApplication
+
+        config = _config(TRADING_MODE="paper", IB_PAPER_PORT="4002")
+        admin = TradingApplication(config, is_admin_instance=True)
+        broker = admin._build_broker()
+
+        assert broker._client_id == config.ibkr.admin_client_id
+        assert broker._client_id != config.ibkr.client_id
+
+    def test_the_trading_process_still_uses_the_trading_client_id(self) -> None:
+        from app.main import TradingApplication
+
+        config = _config(TRADING_MODE="paper", IB_PAPER_PORT="4002")
+        broker = TradingApplication(config)._build_broker()
+
+        assert broker._client_id == config.ibkr.client_id
+
+    def test_the_default_is_not_an_admin_instance(self) -> None:
+        """`python -m app.main` must never silently skip its own health server."""
+        from app.main import TradingApplication
+
+        assert TradingApplication(_config()).is_admin_instance is False
+
+    async def test_the_operator_command_asks_for_an_admin_instance(self) -> None:
+        """Read from the source: the flag has to actually be passed."""
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(Path("app/execution/operator_order.py").read_text())
+        found = False
+        for node in ast.walk(tree):
+            is_construction = (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "TradingApplication"
+            )
+            if is_construction:
+                assert "is_admin_instance" in {kw.arg for kw in node.keywords}  # type: ignore[union-attr]
+                found = True
+        assert found, "operator_order.py no longer constructs a TradingApplication"
+
+
 class TestControl:
     """Without this, every refusal test below is vacuous."""
 

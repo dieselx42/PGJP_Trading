@@ -77,9 +77,30 @@ STATE_KEY_LAST_SHUTDOWN = "last_shutdown_at"
 class TradingApplication:
     """The running trading system."""
 
-    def __init__(self, config: Config, *, run_id: str | None = None) -> None:
+    def __init__(
+        self, config: Config, *, run_id: str | None = None, is_admin_instance: bool = False
+    ) -> None:
+        """Build the application.
+
+        ``is_admin_instance`` marks a short-lived instance run by an operator
+        command *alongside* the trading process, rather than being it. Two
+        things must then not collide with the real one, and both follow from
+        that single fact:
+
+        * **No health server.** The trading process owns the loopback port; a
+          second bind fails with ``EADDRINUSE`` and takes the command with it.
+        * **The admin client id.** IBKR allows one connection per client id and
+          disconnects the loser, so reusing the trading process's id would knock
+          the bot off its broker session to place one order. The read-only
+          checkout and ``cancel-all-orders`` already connect this way.
+
+        Observed rather than anticipated: ``place-order`` failed on the health
+        port the first time it was run against a deployed bot, and the client-id
+        collision was sitting immediately behind it.
+        """
         self.config = config
         self.run_id = run_id or new_run_id()
+        self.is_admin_instance = is_admin_instance
 
         self.state = ApplicationState.STARTING
         self._stop_event = asyncio.Event()
@@ -151,7 +172,9 @@ class TradingApplication:
 
         self.position_book.replace_all(self.repositories.positions.all())
 
-        await self.health_server.start()
+        # An admin instance never binds the port: the trading process owns it.
+        if not self.is_admin_instance:
+            await self.health_server.start()
 
         if self.config.trading_mode is TradingMode.DISABLED:
             # No broker is constructed at all. There is nothing to place an
@@ -191,7 +214,13 @@ class TradingApplication:
         return IBKRBroker(
             host=self.config.ibkr.host,
             port=port,
-            client_id=self.config.ibkr.client_id,
+            # An admin instance uses the admin id so it can never disconnect the
+            # trading process from its own broker session.
+            client_id=(
+                self.config.ibkr.admin_client_id
+                if self.is_admin_instance
+                else self.config.ibkr.client_id
+            ),
             connect_timeout_seconds=self.config.ibkr.connect_timeout_seconds,
             expected_account_type=expected_account_type(mode),
         )
@@ -205,8 +234,9 @@ class TradingApplication:
         with contextlib.suppress(Exception):
             self.repositories.state.set_state(STATE_KEY_LAST_STATE, self.state.value)
             self.repositories.state.set_state(STATE_KEY_LAST_SHUTDOWN, utc_now().isoformat())
-        with contextlib.suppress(Exception):
-            await self.health_server.stop()
+        if not self.is_admin_instance:
+            with contextlib.suppress(Exception):
+                await self.health_server.stop()
         if self.broker is not None:
             with contextlib.suppress(Exception):
                 await self.broker.disconnect()
