@@ -144,12 +144,21 @@ class `MSL`, exchange `CME`, timezone `US/Central`. IBKR lists expirations as
 full last-trade dates (`20260828`), not months, and quotes ten contracts —
 monthly through Jan 2027, quarterly after.
 
-### The one probe that cannot pass in this configuration
+### The one probe that cannot pass with Read-Only API mode on
 
 **`OPEN_ORDERS_EMPTY`.** IB Gateway's Read-Only API mode refuses `reqOpenOrders`
-with code 321 and `reqId` `-1`. That is IBKR's behaviour, not a defect, but it
-means `get_open_orders` — and therefore order reconciliation — cannot be
-exercised until Read-Only mode is turned off at RUNBOOK step 10.
+with code 321 and `reqId` `-1`. That is IBKR's behaviour, not a defect.
+
+But the consequence is larger than one red probe: `get_open_orders` is what
+order **reconciliation** runs on, so reconciliation cannot be exercised at all
+while that mode is on. The read-only soak that is meant to build confidence
+before the first order is precisely the thing the mode prevents — checking that
+no orders exist, through a call that is being refused, checks nothing.
+
+That is why turning Read-Only mode off is its own RUNBOOK step (9), ahead of the
+risk limits and `ALLOW_ORDER_TRANSMIT` at step 10. It removes the outermost of
+four independent layers and leaves the bot's three engaged; any one of those
+still refuses every order on its own.
 
 **`MARKET_DATA` used to be the second.** Code 354: the paper account had no live
 CME futures subscription, and IBKR offers delayed data instead. That is why

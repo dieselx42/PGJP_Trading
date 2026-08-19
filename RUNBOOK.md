@@ -628,7 +628,7 @@ Bind it to `127.0.0.1` wherever it runs.
 In IB Gateway: Configuration → API → Settings:
 
 - ✅ Enable ActiveX and Socket Clients
-- ✅ Read-Only API — **leave this on for the entire read-only checkout below**
+- ✅ Read-Only API — **leave this on through step 8**; it comes off at step 9
 - Socket port `4002`
 - Trusted IPs: `127.0.0.1` only
 - ❌ Do **not** allow connections from other hosts
@@ -718,14 +718,58 @@ Set the verified expiry:
 DEFAULT_CONTRACT_MONTH=<verified YYYYMM>
 ```
 
-### 9. Read-only soak
+### 9. Turn off Read-Only API mode — and only that
 
-With `ALLOW_ORDER_TRANSMIT=false` and IB Gateway still in Read-Only API mode,
-run for a full session and confirm:
+In `.env.ibgateway` on the server:
+
+```ini
+READ_ONLY_API=no
+```
+
+Then recreate **both** containers, because the bot lives in the gateway's
+network namespace:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+**This does not enable trading, and it is not step 10 arriving early.** It
+removes the outermost of four independent layers; the bot's own three are
+untouched and any one of them alone still refuses every order:
+
+| Layer | Where | State after this step |
+|---|---|---|
+| Gateway refuses order submission | `.env.ibgateway` | **off** |
+| `ALLOW_ORDER_TRANSMIT=false` | bot `.env` | still engaged |
+| `KILL_SWITCH=true` | bot `.env` + DB latch | still engaged |
+| All six risk limits `0` | bot `.env` | still engaged |
+
+The reason to do it now, separately, is that **the soak below cannot be
+performed with Read-Only mode on.** Reconciliation depends on
+`get_open_orders`, and the gateway refuses `reqOpenOrders` outright in that mode
+(code 321, `reqId` -1). Verifying "no orders exist" through a call that is being
+refused verifies nothing. This was written the other way round until a live
+session showed the contradiction.
+
+Confirm the effect rather than the setting:
+
+```bash
+docker compose exec -T -e TRADING_MODE=paper sol-trading-bot \
+  python -m app.cli ibkr-checkout --contract-month <YYYYMMDD>
+```
+
+`OPEN_ORDERS_EMPTY` should now pass, and the checkout should be **13/13**. If it
+still reports 321, the gateway did not pick up the change — check that both
+containers were recreated, not just restarted.
+
+### 9b. Read-only soak
+
+With `ALLOW_ORDER_TRANSMIT=false`, run for a full session and confirm:
 
 - reconciliation succeeds on every reconnect
 - market data stays fresh during liquid hours
-- no orders are created (`app.cli open-orders` stays at zero)
+- no orders are created (`app.cli open-orders` stays at zero — a call that now
+  genuinely completes)
 - disconnect/reconnect recovers cleanly
 
 Configure freshness once market data has been observed — until this is
@@ -737,7 +781,14 @@ MARKET_DATA_MAX_AGE_SECONDS=30
 
 ### 10. Only then: controlled paper orders
 
-Turn off IB Gateway's Read-Only API mode and set **small** limits first:
+**Confirm US futures permission is actually granted at IBKR first.** It is
+separate from the market-data subscription, it has its own application and
+cooldown, and nothing in this system can tell you its state — the TWS API
+exposes no such flag, which is why `SOL_FUTURES_PERMISSION_READY` is a hand-set
+variable. Setting it `true` while permission is pending produces rejected orders,
+not trades.
+
+Set **small** limits first:
 
 ```ini
 SOL_FUTURES_PERMISSION_READY=true

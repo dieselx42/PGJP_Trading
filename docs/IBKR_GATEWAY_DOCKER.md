@@ -95,6 +95,12 @@ VNC_SERVER_PASSWORD=<something other than your IBKR password>
 already in the template and both matter — see "Two settings whose absence is
 silent" below before removing either.
 
+`READ_ONLY_API=yes` is right for a fresh install and for the read-only checkout.
+It comes off at **RUNBOOK step 9**, on its own and ahead of the risk limits,
+because the gateway refuses `reqOpenOrders` in that mode and reconciliation
+cannot be exercised without it. Changing it needs both containers recreated
+(`docker compose up -d --force-recreate`), not just restarted.
+
 `chmod 600` is enforced, not advised: `scripts/verify_safety.sh` **fails the
 deployment** if this file is group- or world-readable, or if it is tracked by
 git. Unlike the bot's `.env`, loose permissions here are a failure rather than a
