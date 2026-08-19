@@ -126,6 +126,48 @@ wanted to do.
 
 Output as JSON, same as every other command, so runs are diffable.
 
+## What was actually built, and where it departs from this plan
+
+Phases 1–3 are implemented. Two departures from the design above, both
+deliberate, both stated here rather than left for someone to discover.
+
+**`MarketDataManager` is not in the loop.** The plan routed each bar through it
+so the staleness and delayed-data interlocks would apply live. In practice its
+clock would be the virtual one, so a synthesised quote is always exactly zero
+seconds old and the interlock can never fire — the same value the engine now
+asserts directly, reached through more machinery. Wiring it would also mean
+constructing it with a `Broker`, which is precisely what this package must not
+be able to do. So the market-data conditions are **asserted, not measured**, and
+the engine docstring and every result say so.
+
+**`OrderManager` is not in the loop either.** Its `delta_to_side_and_quantity`
+is used — that is the arithmetic that decides BUY versus SELL and how many — but
+not its persistence and idempotency layer. Idempotency exists to survive a crash
+mid-flight between our database and the broker. A replay is deterministic,
+single-pass, and has no broker to be out of step with, so wiring it would write
+hundreds of thousands of rows to prove a property the replay cannot exhibit.
+
+**Both approvers run on every intent**, rather than stopping at the first
+refusal. The risk manager and the transmit gate check the configuration
+interlocks independently; short-circuiting on risk left the gate unable to fire
+in a replay at all, which would have meant every backtest silently not testing
+it. A refusal now names each party that objected (`risk+gate`) and lists what
+each found.
+
+**The contract is never invented.** `backtest` loads the multiplier, tick size
+and conId from a qualification IBKR actually returned, stored in
+`contract_metadata`. With none stored it refuses and says to run
+`ibkr-checkout`. A guessed multiplier silently scales every P&L figure in the
+result, and a fabricated conId would defeat the check that makes contract
+identity unambiguous.
+
+**Limits come from the deployed configuration** unless overridden on the command
+line, and the output records which. Note the consequence on a halted server:
+every limit is zero, zero means NOT CONFIGURED, and the replay therefore refuses
+every order — correctly. The result says so explicitly rather than presenting a
+flat equity curve, because "the strategy is flat" and "the strategy was never
+allowed to trade" produce identical numbers and mean opposite things.
+
 ## Phase 4 — Later, once permission clears
 
 Swap in IBKR historical data for the real contract, and compare against the spot
@@ -146,6 +188,30 @@ lying, which is worth knowing before trusting any result from Phase 1–3.
 Phases 1–3 are usable together; there is no point shipping 1 alone.
 
 ---
+
+## Running one
+
+```bash
+cd /opt/sol-futures-trading-bot
+
+# 1. Verify the source with ten bars before pulling a year.
+docker compose exec -T sol-trading-bot python -m app.cli bars-import --limit 10
+docker compose exec -T sol-trading-bot python -m app.cli bars-import        # a year
+docker compose exec -T sol-trading-bot python -m app.cli bars-info
+
+# 2. Replay. Limits default to the deployed (halted) ones, which refuse
+#    everything; pass explicit limits to evaluate a strategy under limits you
+#    are actually considering.
+docker compose exec -T sol-trading-bot python -m app.cli backtest \
+  --max-order-size 1 --max-position 1 --max-orders-per-hour 60 \
+  --max-open-orders 2 --max-daily-loss 500 --max-notional 20000
+
+# 3. Confirm the interlocks bite, using the deployed switches as they stand.
+docker compose exec -T sol-trading-bot python -m app.cli backtest --inherit-switches
+```
+
+`backtest` reads `bars` and `contract_metadata` and writes nothing. It cannot
+reach a broker, cannot change a switch, and cannot affect a running bot.
 
 ## Decisions I need
 

@@ -650,6 +650,216 @@ def cmd_bars_info(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_backtest(config: Config, args: argparse.Namespace) -> int:
+    """Replay stored bars through the real interlocks.
+
+    Reads the `bars` and `contract_metadata` tables. It writes nothing, reaches
+    no broker, and cannot affect a running bot.
+
+    Two things it deliberately refuses to do rather than guess:
+
+    * **Invent a contract.** The multiplier, tick size and conId come from a
+      qualification IBKR actually returned, loaded from the database. With none
+      stored it stops and says to run `ibkr-checkout` -- a fabricated conId
+      would defeat the check that makes contract identity unambiguous, and a
+      guessed multiplier silently scales every P&L figure in the result.
+    * **Loosen a limit.** The risk limits come from the deployed configuration
+      unless explicitly overridden on the command line, and the result records
+      which. A replay run under limits nobody uses answers a question nobody
+      asked.
+    """
+    from decimal import Decimal, InvalidOperation  # noqa: PLC0415
+
+    from app.backtest.broker import FillModel  # noqa: PLC0415
+    from app.backtest.engine import (  # noqa: PLC0415
+        BacktestEngine,
+        always_tradeable,
+        backtest_config,
+        cme_liquid_hours,
+    )
+    from app.backtest.results import build_report  # noqa: PLC0415
+    from app.backtest.store import BarRepository  # noqa: PLC0415
+    from app.strategy.noop import build_strategy  # noqa: PLC0415
+
+    try:
+        commission = Decimal(args.commission)
+    except InvalidOperation:
+        _emit({"result": "INVALID_COMMISSION", "value": args.commission})
+        return EXIT_ERROR
+    if commission < 0 or args.slippage_ticks < 0 or args.spread_ticks < 0:
+        # A negative cost is a fill model that pays the strategy to trade.
+        _emit({"result": "INVALID_FILL_MODEL", "detail": "costs cannot be negative"})
+        return EXIT_ERROR
+
+    try:
+        strategy = build_strategy(args.strategy or config.strategy_name)
+    except KeyError as exc:
+        _emit({"result": "UNKNOWN_STRATEGY", "error": str(exc)})
+        return EXIT_ERROR
+
+    limits = config.risk
+    overrides: dict[str, str] = {}
+    limit_args = {
+        "MAX_ORDER_SIZE": (args.max_order_size, limits.max_order_size),
+        "MAX_POSITION_CONTRACTS": (args.max_position, limits.max_position_contracts),
+        "MAX_ORDERS_PER_HOUR": (args.max_orders_per_hour, limits.max_orders_per_hour),
+        "MAX_OPEN_ORDERS": (args.max_open_orders, limits.max_open_orders),
+        "MAX_DAILY_LOSS_USD": (args.max_daily_loss, limits.max_daily_loss_usd),
+        "MAX_NOTIONAL_EXPOSURE_USD": (args.max_notional, limits.max_notional_exposure_usd),
+    }
+    limit_source = {
+        name: ("command line" if supplied is not None else "deployed configuration")
+        for name, (supplied, _) in limit_args.items()
+    }
+    for name, (supplied, deployed) in limit_args.items():
+        overrides[name] = str(deployed if supplied is None else supplied)
+
+    if args.inherit_switches:
+        overrides["KILL_SWITCH"] = "true" if config.kill_switch else "false"
+        overrides["ALLOW_ORDER_TRANSMIT"] = "true" if config.allow_order_transmit else "false"
+
+    database, repositories = _open_database(config)
+    try:
+        database.migrate()
+
+        contract = repositories.contracts.find(args.contract_symbol, args.contract_month)
+        if contract is None:
+            _emit(
+                {
+                    "result": "NO_QUALIFIED_CONTRACT",
+                    "requested": {
+                        "symbol": args.contract_symbol,
+                        "expiration": args.contract_month,
+                    },
+                    "detail": (
+                        "no stored qualification for this contract. Run `ibkr-checkout "
+                        "--contract-month YYYYMM` first. A contract is never invented here: "
+                        "a guessed multiplier would silently scale every P&L figure below."
+                    ),
+                }
+            )
+            return EXIT_ERROR
+
+        try:
+            replay_config = backtest_config(
+                symbol=contract.symbol,
+                max_position_contracts=int(overrides["MAX_POSITION_CONTRACTS"]),
+                max_order_size=int(overrides["MAX_ORDER_SIZE"]),
+                max_daily_loss_usd=overrides["MAX_DAILY_LOSS_USD"],
+                max_orders_per_hour=int(overrides["MAX_ORDERS_PER_HOUR"]),
+                max_open_orders=int(overrides["MAX_OPEN_ORDERS"]),
+                max_notional_exposure_usd=overrides["MAX_NOTIONAL_EXPOSURE_USD"],
+                overrides=overrides,
+            )
+        except ConfigError as exc:
+            _emit({"result": "INVALID_BACKTEST_CONFIG", "error": str(exc)})
+            return EXIT_ERROR
+
+        bars = BarRepository(database).load(
+            source=args.source,
+            symbol=args.symbol,
+            interval=args.interval,
+            start=None if args.start is None else _parse_day(args.start),
+            end=None if args.end is None else _parse_day(args.end),
+        )
+        if not bars:
+            _emit(
+                {
+                    "result": "NO_BARS",
+                    "requested": {
+                        "source": args.source,
+                        "symbol": args.symbol,
+                        "interval": args.interval,
+                    },
+                    "detail": (
+                        "import history first: `bars-import --limit 10` to verify the "
+                        "source, then a full year."
+                    ),
+                }
+            )
+            return EXIT_ERROR
+
+        engine = BacktestEngine(
+            config=replay_config,
+            contract=contract,
+            strategy=strategy,
+            fill_model=FillModel(
+                slippage_ticks=args.slippage_ticks,
+                commission_per_contract=commission,
+                spread_ticks=args.spread_ticks,
+            ),
+            session=cme_liquid_hours if args.session == "cme" else always_tradeable,
+        )
+        report = build_report(engine.run(bars))
+    finally:
+        database.close()
+
+    payload: dict[str, object] = {
+        "result": "REPLAYED",
+        "strategy": strategy.describe(),
+        "contract": {
+            "symbol": contract.symbol,
+            "local_symbol": contract.local_symbol,
+            "con_id": contract.con_id,
+            "expiration": contract.expiration,
+            "multiplier": contract.multiplier,
+            "min_tick": str(contract.min_tick),
+            "source": "stored IBKR qualification, not invented",
+        },
+        "limits": {
+            "values": replay_config.risk.as_dict(),
+            "source": limit_source,
+        },
+        "switches": {
+            "inherited_from_deployed_config": bool(args.inherit_switches),
+            "kill_switch": replay_config.kill_switch,
+            "allow_order_transmit": replay_config.allow_order_transmit,
+            "note": (
+                "without --inherit-switches a replay runs with the master switches "
+                "released, so a halted server can still answer 'what would this have "
+                "done'. It changes nothing on the server either way."
+            ),
+        },
+        **report.describe(),
+    }
+    if not report.run.fills:
+        payload["why_no_trades"] = _why_no_trades(strategy.name, report.refusals_by_reason)
+    _emit({**payload, **build_info(config)})
+    return EXIT_OK
+
+
+def _why_no_trades(strategy_name: str, refusals_by_reason: dict[str, int]) -> str:
+    """An empty result must say which kind of empty it is.
+
+    "The strategy produced nothing" and "the strategy was refused" look
+    identical in the numbers and mean opposite things. Distinguishing them
+    matters most for the deployed halted configuration, where every limit is
+    zero -- which means NOT CONFIGURED and therefore prohibited, never
+    unlimited. An operator seeing a flat result there should be told the
+    replay never got to trade rather than concluding the strategy is flat.
+    """
+    unconfigured = sorted(r for r in refusals_by_reason if r.endswith("_NOT_CONFIGURED"))
+    if unconfigured:
+        return (
+            "every order was refused because the deployed configuration does not "
+            f"authorise trading: {', '.join(unconfigured)}. Zero means NOT CONFIGURED, "
+            "never unlimited. Pass explicit limits (--max-order-size, --max-position, "
+            "...) to replay under limits you want to evaluate."
+        )
+    if refusals_by_reason:
+        top = max(refusals_by_reason.items(), key=lambda kv: (kv[1], kv[0]))
+        return (
+            f"no order was transmitted; the most frequent refusal was {top[0]} "
+            f"({top[1]} times). This is an interlock result, not a strategy result."
+        )
+    if strategy_name == "noop":
+        return (
+            "the registered strategy is `noop`, which never produces an intent. This "
+            "result is a plumbing check, not a statement about any trading edge."
+        )
+    return "the strategy produced no intent that required an order over this history."
+
+
 def _source_name(source: object) -> str:
     return str(getattr(source, "source_name", None) or getattr(source, "name", "unknown"))
 
@@ -685,6 +895,7 @@ COMMANDS = {
     "check-permission": cmd_check_permission,
     "bars-import": cmd_bars_import,
     "bars-info": cmd_bars_info,
+    "backtest": cmd_backtest,
 }
 
 
@@ -765,6 +976,61 @@ def build_parser() -> argparse.ArgumentParser:
                 metavar="JSON",
                 help='e.g. \'{"opened_at":"time","open":"o","high":"h","low":"l","close":"c"}\'',
             )
+        if name == "backtest":
+            sub.add_argument("--symbol", default="SOLUSDT", help="the BAR symbol to replay")
+            sub.add_argument("--interval", default="1m", choices=("1m", "5m", "15m", "1h", "1d"))
+            sub.add_argument("--source", default="binance", help="bar provenance, e.g. binance")
+            sub.add_argument("--start", default=None, metavar="YYYY-MM-DD")
+            sub.add_argument("--end", default=None, metavar="YYYY-MM-DD")
+            sub.add_argument(
+                "--contract-symbol",
+                default="MSL",
+                help=(
+                    "the FUTURES contract to price against. Loaded from a stored IBKR "
+                    "qualification; never invented, because a guessed multiplier silently "
+                    "scales every P&L figure in the result."
+                ),
+            )
+            sub.add_argument("--contract-month", default=None, metavar="YYYYMM")
+            sub.add_argument(
+                "--strategy",
+                default=None,
+                help="registered strategy name; defaults to STRATEGY_NAME",
+            )
+            sub.add_argument(
+                "--session",
+                choices=("cme", "all"),
+                default="cme",
+                help=(
+                    "cme (default) trades only CME liquid hours. `all` is honest for spot "
+                    "data and wrong for futures -- it trades bars the contract does not."
+                ),
+            )
+            sub.add_argument("--slippage-ticks", type=int, default=1)
+            sub.add_argument("--spread-ticks", type=int, default=2)
+            sub.add_argument(
+                "--commission",
+                default="3.41",
+                help="per contract per side; the default is what IBKR quoted for MSLQ6",
+            )
+            sub.add_argument(
+                "--inherit-switches",
+                action="store_true",
+                help=(
+                    "run the replay under the deployed kill switch and transmit setting. "
+                    "Off by default so a halted server can still answer 'what would this "
+                    "have done'. Changes nothing on the server either way."
+                ),
+            )
+            for flag, help_text in (
+                ("--max-order-size", "contracts per order"),
+                ("--max-position", "contracts held"),
+                ("--max-orders-per-hour", "order rate"),
+                ("--max-open-orders", "working orders"),
+            ):
+                sub.add_argument(flag, type=int, default=None, help=f"override {help_text}")
+            sub.add_argument("--max-daily-loss", default=None, help="override, USD")
+            sub.add_argument("--max-notional", default=None, help="override, USD")
         if name == "verify":
             sub.add_argument(
                 "--posture",

@@ -628,6 +628,29 @@ class ContractRepository:
             raw=json.loads(row["raw"] or "{}"),
         )
 
+    def find(self, symbol: str, expiration: str | None = None) -> QualifiedContract | None:
+        """The stored qualification for a symbol, most recent expiration first.
+
+        Used by the backtester, which needs a contract's real multiplier, tick
+        size and conId but must never reach a broker to get them. Returning
+        ``None`` when nothing is stored is the point: a replay then refuses
+        rather than inventing a contract, and a fabricated conId in particular
+        would defeat the check that exists to make contract identity
+        unambiguous.
+        """
+        if expiration:
+            row = self._db.query_one(
+                "SELECT con_id FROM contract_metadata WHERE symbol = ? AND expiration = ?",
+                (symbol.upper(), expiration),
+            )
+        else:
+            row = self._db.query_one(
+                "SELECT con_id FROM contract_metadata WHERE symbol = ? "
+                "ORDER BY expiration DESC LIMIT 1",
+                (symbol.upper(),),
+            )
+        return None if row is None else self.get(int(row["con_id"]))
+
     def all(self) -> Sequence[dict[str, object]]:
         rows = self._db.query_all("SELECT * FROM contract_metadata ORDER BY expiration")
         # `for key in row` would iterate sqlite3.Row *values*, not keys.
