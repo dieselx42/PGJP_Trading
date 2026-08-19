@@ -32,6 +32,8 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from app.config import Config, ConfigError
@@ -529,6 +531,133 @@ def cmd_place_order(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK if payload.get("result") in {"SUBMITTED", "PREVIEW_ONLY"} else EXIT_ERROR
 
 
+def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
+    """Fetch historical bars into the local store.
+
+    Reads and writes the `bars` table only. It cannot reach a broker and cannot
+    affect a running bot -- see `app/backtest/__init__.py`.
+
+    Use `--limit` for the first run against a new source. The HTTP path is the
+    one thing here that could not be tested before deployment, so fetch ten
+    bars, look at them, and only then fetch a year.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    from app.backtest.sources import (  # noqa: PLC0415
+        BinanceBarSource,
+        CsvBarSource,
+        HistoricalSourceError,
+    )
+    from app.backtest.store import BarRepository  # noqa: PLC0415
+
+    end = datetime.now(UTC) if args.end is None else _parse_day(args.end)
+    start = end - timedelta(days=args.days) if args.start is None else _parse_day(args.start)
+    if start >= end:
+        _emit({"result": "INVALID_RANGE", "start": start.isoformat(), "end": end.isoformat()})
+        return EXIT_ERROR
+
+    source: object
+    if args.source == "csv":
+        if not args.csv_path:
+            _emit({"result": "CSV_PATH_REQUIRED", "detail": "--csv-path is required for csv"})
+            return EXIT_ERROR
+        try:
+            columns = json.loads(args.csv_columns) if args.csv_columns else {}
+        except json.JSONDecodeError as exc:
+            _emit({"result": "INVALID_CSV_COLUMNS", "error": str(exc)})
+            return EXIT_ERROR
+        try:
+            source = CsvBarSource(
+                Path(args.csv_path), source_name=args.csv_source_name, columns=columns
+            )
+        except HistoricalSourceError as exc:
+            _emit({"result": "INVALID_CSV_MAPPING", "error": str(exc)})
+            return EXIT_ERROR
+    else:
+        source = BinanceBarSource()
+
+    database, _ = _open_database(config)
+    try:
+        database.migrate()
+        repo = BarRepository(database)
+        fetched: list[object] = []
+        try:
+            for bar in source.fetch(
+                symbol=args.symbol, interval=args.interval, start=start, end=end
+            ):
+                fetched.append(bar)
+                if args.limit and len(fetched) >= args.limit:
+                    break
+        except HistoricalSourceError as exc:
+            _emit(
+                {
+                    "result": "FETCH_FAILED",
+                    "error": str(exc),
+                    "fetched_before_failure": len(fetched),
+                }
+            )
+            return EXIT_ERROR
+
+        added = repo.insert_many(fetched)  # type: ignore[arg-type]
+        info = repo.info(source=_source_name(source), symbol=args.symbol, interval=args.interval)
+        _emit(
+            {
+                "result": "IMPORTED",
+                "requested": {
+                    "symbol": args.symbol,
+                    "interval": args.interval,
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "limit": args.limit,
+                },
+                "fetched": len(fetched),
+                "added": added,
+                "already_present": len(fetched) - added,
+                "sample": [b.describe() for b in fetched[:3]],  # type: ignore[attr-defined]
+                "stored": info.describe(),
+                "note": (
+                    "gaps are reported, never filled. A missing bar is a fact about the "
+                    "data; inventing a price to cover it is how a backtest starts lying."
+                ),
+            }
+        )
+    finally:
+        database.close()
+    return EXIT_OK
+
+
+def cmd_bars_info(config: Config, args: argparse.Namespace) -> int:
+    """What history is stored, over what range, with gaps named."""
+    del args
+    from app.backtest.store import BarRepository  # noqa: PLC0415
+
+    database, _ = _open_database(config)
+    try:
+        database.migrate()
+        repo = BarRepository(database)
+        series = repo.series()
+        _emit(
+            {
+                "series_count": len(series),
+                "series": [
+                    repo.info(source=src, symbol=sym, interval=iv).describe()
+                    for src, sym, iv in series
+                ],
+            }
+        )
+    finally:
+        database.close()
+    return EXIT_OK
+
+
+def _source_name(source: object) -> str:
+    return str(getattr(source, "source_name", None) or getattr(source, "name", "unknown"))
+
+
+def _parse_day(raw: str) -> datetime:
+    return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC)
+
+
 def cmd_config(config: Config, args: argparse.Namespace) -> int:
     del args
     _emit({"config": config.redacted(), **build_info(config)})
@@ -554,6 +683,8 @@ COMMANDS = {
     "ibkr-checkout": cmd_ibkr_checkout,
     "place-order": cmd_place_order,
     "check-permission": cmd_check_permission,
+    "bars-import": cmd_bars_import,
+    "bars-info": cmd_bars_info,
 }
 
 
@@ -606,6 +737,33 @@ def build_parser() -> argparse.ArgumentParser:
                     "the contract's broker-reported local symbol. Omit for a preview that "
                     "sends nothing; the preview prints the value to pass here."
                 ),
+            )
+        if name == "bars-import":
+            sub.add_argument("--symbol", default="SOLUSDT")
+            sub.add_argument("--interval", default="1m", choices=("1m", "5m", "15m", "1h", "1d"))
+            sub.add_argument("--source", default="binance", choices=("binance", "csv"))
+            sub.add_argument(
+                "--days", type=int, default=365, help="lookback when --start is absent"
+            )
+            sub.add_argument("--start", default=None, metavar="YYYY-MM-DD")
+            sub.add_argument("--end", default=None, metavar="YYYY-MM-DD")
+            sub.add_argument(
+                "--limit",
+                type=int,
+                default=0,
+                help=(
+                    "stop after N bars. Use a small value on the FIRST run against a new "
+                    "source: the HTTP path could not be tested before deployment, so the "
+                    "first real fetch is the verification."
+                ),
+            )
+            sub.add_argument("--csv-path", default=None)
+            sub.add_argument("--csv-source-name", default="csv")
+            sub.add_argument(
+                "--csv-columns",
+                default=None,
+                metavar="JSON",
+                help='e.g. \'{"opened_at":"time","open":"o","high":"h","low":"l","close":"c"}\'',
             )
         if name == "verify":
             sub.add_argument(
