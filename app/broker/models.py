@@ -313,6 +313,50 @@ class PlaceOrderResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PermissionProbe:
+    """What the broker said when asked to price an order it would never send.
+
+    The TWS API exposes no "is this account permitted to trade CME futures"
+    flag, so the question cannot be *read*. It can be **observed**: IBKR prices
+    a ``whatIf`` order for an account that may trade the contract and refuses
+    one for an account that may not. That turns an unanswerable question into a
+    measurement, which is the same move the read-only checkout makes everywhere
+    else.
+
+    ``permitted`` is deliberately three-state and the three mean different
+    things:
+
+    * ``True``  -- observed permitted. IBKR priced it.
+    * ``False`` -- observed NOT permitted. IBKR refused with a permission code.
+      This is authoritative and **overrides an operator declaration**: a human
+      who believes permission exists is simply wrong, and the broker just said
+      so.
+    * ``None``  -- not determined. The probe did not run, or failed for a
+      reason that says nothing about permission (no connection, no contract).
+      Unknown is never treated as permitted.
+    """
+
+    permitted: bool | None
+    detail: str
+    initial_margin: Decimal | None = None
+    maintenance_margin: Decimal | None = None
+    commission: Decimal | None = None
+    error_code: int | None = None
+    probed_at: str | None = None
+
+    def describe(self) -> dict[str, object]:
+        return {
+            "permitted": self.permitted,
+            "detail": self.detail,
+            "initial_margin": _opt_str(self.initial_margin),
+            "maintenance_margin": _opt_str(self.maintenance_margin),
+            "commission": _opt_str(self.commission),
+            "error_code": self.error_code,
+            "probed_at": self.probed_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ContractLookupRequest:
     spec: ContractSpec
     include_expired: bool = False

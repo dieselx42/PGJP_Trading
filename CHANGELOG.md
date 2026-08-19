@@ -162,6 +162,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had never returned a green result before that run — which is not the same
   thing as a probe that returns green, and is worth distinguishing.
 
+- **`TRADING_PERMISSION_UNAVAILABLE_AT_BROKER` was impossible to satisfy.** The
+  TWS API exposes no "may this account trade CME futures" flag, so the IBKR
+  adapter reports `None` for every account — and `None` was treated as *not
+  permitted*, by both the risk manager and the gate. No configuration and no
+  account could ever pass it: the deployed system could not have transmitted an
+  order under any circumstances.
+
+  It survived the entire life of the project because `MockBroker` reports
+  `True`. Every test passed. Only a real account revealed it, on the first
+  fully-armed run.
+
+  `futures_permission` now means three things rather than two. `True` and
+  `False` are both *observed* and both authoritative — an observed refusal
+  **overrides** an operator's `SOL_FUTURES_PERMISSION_READY=true`, because the
+  broker decides. `None` means undetermined and falls back to the operator's
+  declaration. `status` reports which of the three produced the result, so a
+  declaration is never mistaken for an observation.
+
+- `app.cli check-permission` — observes futures permission with a `whatIf`
+  preview rather than asking for a flag that does not exist. IBKR prices an
+  order the account may trade and refuses one it may not, so the operator's
+  declaration can rest on evidence; it is also the only thing here that would
+  notice permission being *revoked*. It cannot place an order: `whatIf` is
+  assigned a literal `True` on the line the order is built and is not a
+  parameter, which two tests assert by parsing the AST. It lives outside
+  `checkout.py` deliberately, so the read-only checkout keeps its no-write-
+  methods guarantee.
+
+- `app.cli verify --posture` completes the #15 fix. `verify_safety.sh` learned
+  about postures but the post-deploy runtime check did not, so `deploy.sh`
+  reported `POSTURE_NOT_APPROVED` and exited non-zero *after* deploying
+  successfully. Under `paper-armed` the differences from the halted posture are
+  expected and no longer reported as failures — but `LIVE_TRADING_ENABLED` and
+  `CAN_TRANSMIT_LIVE_ORDERS` are still asserted exactly as under `halted`.
+
 - The operator-order preview validated through the *same* `SignalValidator` the
   pipeline then used. `validate()` records an intent id whenever it accepts —
   that is what makes a replayed signal harmless — so the real submission was

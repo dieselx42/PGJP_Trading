@@ -75,10 +75,19 @@ from app.broker.models import (
     ConnectionInfo,
     MarketDataTick,
     OrderRequest,
+    PermissionProbe,
     PlaceOrderResult,
 )
 from app.contracts.models import ContractSpec, QualifiedContract
-from app.enums import AccountType, ConnectionState, OrderSide, OrderStatus, OrderType, SecurityType
+from app.enums import (
+    AccountType,
+    ConnectionState,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    SecurityType,
+    TimeInForce,
+)
 from app.logging_config import get_logger, mask_account_id
 from app.utilities.timeutils import utc_now
 
@@ -262,6 +271,10 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         #: Errors attributed to a request id that had no pending future --
         #: streaming subscriptions. See :meth:`request_error`.
         self._request_errors: dict[int, BrokerError] = {}
+        #: whatIf previews keyed by order id. IBKR answers a whatIf through
+        #: `openOrder` with an OrderState carrying margin and commission and no
+        #: order behind it, so these never become working orders.
+        self.what_if_states: dict[int, Any] = {}
 
     # -- unattributed errors ----------------------------------------------
 
@@ -468,6 +481,12 @@ class _IBSession(EWrapper, EClient):  # type: ignore[misc] # ibapi is untyped
         rows = self._rows(_OPEN_ORDERS_REQ_ID)
         if rows is not None:
             rows.append((orderId, contract, order, orderState))
+        # A whatIf reply arrives here too, distinguishable by the flag on the
+        # order IBKR echoes back. Recorded separately so it can never be
+        # mistaken for a working order in the open-orders list.
+        if getattr(order, "whatIf", False):
+            with self._lock:
+                self.what_if_states[orderId] = orderState
         self.last_message_at = utc_now()
 
     def openOrderEnd(self) -> None:
@@ -566,6 +585,12 @@ _DELAYED_TICK_TYPES: Final[frozenset[int]] = frozenset({66, 67, 68})
 
 #: How often to check for the first tick of a new subscription.
 _FIRST_TICK_POLL_SECONDS: Final[float] = 0.25
+
+#: Limit price for the permission probe. Far below any plausible MSL market,
+#: so that even if IBKR ignored the whatIf flag the result would be a resting
+#: order rather than a fill. Belt and braces behind a flag that is not a
+#: parameter -- the probe is safe because of `whatIf`, not because of this.
+_PERMISSION_PROBE_LIMIT_PRICE: Final[Decimal] = Decimal("1.00")
 
 #: IBKR order status strings mapped onto our vocabulary.
 IB_STATUS_MAP: Final[dict[str, OrderStatus]] = {
@@ -1122,6 +1147,66 @@ class IBKRBroker(Broker):
             accepted=True, broker_order_id=broker_order_id, status=OrderStatus.PENDING_SUBMIT
         )
 
+    async def probe_futures_permission(self, contract: QualifiedContract) -> PermissionProbe:
+        """Ask IBKR to price an order it is told never to place.
+
+        The TWS API has no permission flag, so permission cannot be read. This
+        observes it instead: ``whatIf`` asks IBKR what an order *would* cost,
+        and IBKR answers with margin and commission for an account that may
+        trade the contract, or refuses with a permission code for one that may
+        not.
+
+        **This cannot place an order.** ``whatIf`` is set on the line the order
+        is built and never taken from a parameter, so there is no argument any
+        caller can pass to turn this into a real order. It is also the reason
+        this method lives here rather than in the read-only checkout, whose
+        ``ReadOnlyBroker`` protocol has no write methods at all -- adding a
+        ``placeOrder`` caller there would have cost that guarantee for every
+        other probe.
+
+        The order is a limit far from the market with the whatIf flag set, so
+        even a hypothetical IBKR-side failure to honour the flag leaves a
+        resting order rather than a fill.
+        """
+        session = self._require_session()
+        if contract.is_continuous:
+            raise BrokerOrderRejectedError("continuous futures can never carry an order")
+
+        order_id = session.take_order_id()
+        order = Order()
+        order.action = OrderSide.BUY.value
+        order.totalQuantity = Decimal(1)
+        order.orderType = _ORDER_TYPE_MAP[OrderType.LIMIT]
+        order.tif = TimeInForce.DAY.value
+        order.lmtPrice = float(_PERMISSION_PROBE_LIMIT_PRICE)
+        order.orderRef = "permission-probe"
+        # NOT a parameter, and never one. The whole safety of this method is
+        # that no caller can reach this line with a different value.
+        order.whatIf = True
+
+        started_at = utc_now()
+        session.placeOrder(order_id, _to_ib_contract(contract.to_spec()), order)
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._request_timeout
+        while True:
+            state = session.what_if_states.pop(order_id, None)
+            if state is not None:
+                return _permission_probe_from_state(state, probed_at=started_at)
+            error = session.request_error(order_id)
+            if error is not None:
+                return _permission_probe_from_error(error, probed_at=started_at)
+            if loop.time() >= deadline:
+                return PermissionProbe(
+                    permitted=None,
+                    detail=(
+                        f"IBKR did not answer the whatIf preview within "
+                        f"{self._request_timeout}s; permission is undetermined, not denied"
+                    ),
+                    probed_at=started_at.isoformat(),
+                )
+            await asyncio.sleep(_FIRST_TICK_POLL_SECONDS)
+
     async def cancel_order(self, broker_order_id: str) -> bool:
         session = self._require_session()
         try:
@@ -1178,6 +1263,51 @@ def _to_ib_contract(spec: ContractSpec) -> Any:
     if spec.multiplier:
         contract.multiplier = spec.multiplier
     return contract
+
+
+def _permission_probe_from_state(state: Any, *, probed_at: datetime) -> PermissionProbe:
+    """IBKR priced the order, so the account may trade the contract."""
+    commission = _opt_decimal(getattr(state, "commission", None)) or _opt_decimal(
+        getattr(state, "commissionAndFee", None)
+    )
+    return PermissionProbe(
+        permitted=True,
+        detail=(
+            "IBKR priced a whatIf preview for this contract, which it does not do "
+            "for an account that is not permitted to trade it"
+        ),
+        initial_margin=_opt_decimal(getattr(state, "initMarginChange", None)),
+        maintenance_margin=_opt_decimal(getattr(state, "maintMarginChange", None)),
+        commission=commission,
+        probed_at=probed_at.isoformat(),
+    )
+
+
+def _permission_probe_from_error(error: BrokerError, *, probed_at: datetime) -> PermissionProbe:
+    """IBKR refused. Only a *permission* refusal is evidence about permission.
+
+    A contract or connectivity error says nothing about whether the account may
+    trade, and reporting one as ``permitted=False`` would state a fact we did
+    not observe. Those return ``None`` -- undetermined -- which is still never
+    treated as permitted.
+    """
+    code = getattr(error, "code", None)
+    if isinstance(error, BrokerPermissionError):
+        return PermissionProbe(
+            permitted=False,
+            detail=f"IBKR refused the whatIf preview for permission reasons: {error}",
+            error_code=code if isinstance(code, int) else None,
+            probed_at=probed_at.isoformat(),
+        )
+    return PermissionProbe(
+        permitted=None,
+        detail=(
+            f"the whatIf preview failed for a reason that says nothing about permission: "
+            f"{error}. Undetermined, which is not the same as denied."
+        ),
+        error_code=code if isinstance(code, int) else None,
+        probed_at=probed_at.isoformat(),
+    )
 
 
 def _to_ib_order(request: OrderRequest) -> Any:

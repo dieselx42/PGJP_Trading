@@ -630,15 +630,49 @@ class TradingApplication:
         )
 
     def _broker_permission_ready(self) -> bool:
-        """Broker-reported permission.
+        """Broker-reported permission, with three distinct meanings.
 
-        ``None`` from the adapter means "we could not determine this", which is
-        treated as not permitted. The IBKR adapter always reports ``None`` today
-        because the TWS API exposes no such flag -- see ``ibkr_broker.py``.
+        * ``True``  -- observed permitted. Authoritative.
+        * ``False`` -- observed NOT permitted. Also authoritative, and it
+          **overrides the operator's declaration**: a human who set
+          ``SOL_FUTURES_PERMISSION_READY=true`` while the broker says no is
+          simply wrong, and the broker is the one who decides.
+        * ``None``  -- could not be determined. Falls back to the declaration.
+
+        That last branch is not a loosening; it is the removal of a dead end.
+        The TWS API exposes no permission flag, so the IBKR adapter reports
+        ``None`` for every account, and treating ``None`` as "not permitted"
+        made this interlock **impossible to satisfy** -- no configuration and no
+        account could ever pass it. It went unnoticed because ``MockBroker``
+        reports ``True``, so the whole test suite passed while the deployed
+        system could not have transmitted an order under any circumstances.
+
+        The declaration is meant to be backed by evidence rather than belief:
+        ``app.cli check-permission`` observes the answer with a ``whatIf``
+        preview and prints what IBKR said. ``status`` reports which of the three
+        cases produced this result, so nobody has to guess whether permission
+        was observed or merely asserted.
         """
         if self.account is None:
             return False
-        return self.account.futures_permission is True
+        observed = self.account.futures_permission
+        if observed is not None:
+            return observed
+        return self.config.sol_futures_permission_ready
+
+    def _permission_source(self) -> str:
+        """Whether permission was observed at the broker or declared by a human."""
+        if self.account is None:
+            return "unknown: no account data"
+        observed = self.account.futures_permission
+        if observed is True:
+            return "observed at the broker"
+        if observed is False:
+            return "observed at the broker: NOT permitted"
+        return (
+            "declared by the operator (SOL_FUTURES_PERMISSION_READY); the TWS API "
+            "reports no permission flag. Run `app.cli check-permission` to observe it."
+        )
 
     def _connection_state(self) -> ConnectionState:
         if self.broker is None:
@@ -716,6 +750,16 @@ class TradingApplication:
             "safety": {
                 **safety_summary(self.config, kill_switch_engaged=self.kill_switch.engaged()),
                 "kill_switch_detail": self.kill_switch.describe(),
+                # Whether trading permission was OBSERVED at the broker or merely
+                # declared by a human. They authorise identically and mean very
+                # different things, so the distinction is reported rather than
+                # left to be inferred from a boolean.
+                "futures_permission": {
+                    "effective": self._broker_permission_ready(),
+                    "broker_reported": (self.account.futures_permission if self.account else None),
+                    "operator_declared": self.config.sol_futures_permission_ready,
+                    "source": self._permission_source(),
+                },
                 "transmit_gate": self.gate.evaluate(
                     self._build_gate_context(risk_approved=False)
                 ).as_dict(),
