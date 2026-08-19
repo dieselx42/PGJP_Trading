@@ -55,7 +55,18 @@ log "Deploying commit $GIT_COMMIT"
 
 # -----------------------------------------------------------------------------
 log "Verifying trading safety configuration"
-bash scripts/verify_safety.sh .env || fail "safety verification failed; refusing to deploy"
+# DEPLOY_POSTURE selects WHICH configuration counts as correct; it defaults to
+# the halted one, so a deploy that says nothing gets the refusing answer. An
+# operator arms the system deliberately and visibly:
+#
+#     DEPLOY_POSTURE=paper-armed bash scripts/deploy.sh main
+#
+# This never edits .env -- the values are still changed by a human, by hand.
+# It only tells the check which state was intended. No posture approves a live
+# configuration; see scripts/verify_safety.sh.
+DEPLOY_POSTURE="${DEPLOY_POSTURE:-halted}"
+bash scripts/verify_safety.sh .env "$DEPLOY_POSTURE" \
+    || fail "safety verification failed for posture '$DEPLOY_POSTURE'; refusing to deploy"
 
 # -----------------------------------------------------------------------------
 log "Preparing data and log directories"

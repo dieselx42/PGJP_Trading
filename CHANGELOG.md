@@ -104,6 +104,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `scripts/verify_safety.sh` takes a **posture**: `halted` (the default, and
+  what it has always checked) or `paper-armed`, selected explicitly at the
+  shell with `DEPLOY_POSTURE=paper-armed bash scripts/deploy.sh main`.
+
+  RUNBOOK step 10 told you to arm the system, and `deploy.sh` then refused to
+  deploy because the configuration was not the halted one — so the step was
+  impossible to follow. The same shape as the step 9 contradiction, and found
+  the same way: by running it.
+
+  `paper-armed` is not "skip the checks". It is a different set, and several
+  are stricter: a limit left at `0` **fails**, because zero means NOT CONFIGURED
+  and an armed system carrying one would refuse every order while appearing
+  ready. `MARKET_DATA_MAX_AGE_SECONDS=0` and an unset `DEFAULT_CONTRACT_MONTH`
+  fail for the same reason. Sanity ceilings catch a fat-fingered extra digit.
+
+  `LIVE_TRADING_ENABLED=false` and `TRADING_MODE != live` are asserted under
+  **every** posture, and there is deliberately no `live-armed`. The default is
+  `halted`, so a deploy that says nothing gets the refusing answer, and
+  `deploy.yml` never sets the variable.
+
 - The IBKR adapter, `docs/IBKR_API_NOTES.md` and `app/contracts/solana.py` no
   longer claim to be unverified. The adapter met a real gateway on 2026-08-08
   and most of what those files warned about is now confirmed working — a stale

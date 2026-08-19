@@ -15,6 +15,40 @@
 set -uo pipefail
 
 ENV_FILE="${1:-.env}"
+
+# -----------------------------------------------------------------------------
+# POSTURE -- which configuration this script should consider correct.
+#
+#   halted       (default) Every interlock engaged, every limit 0. The shipped
+#                state, and the one CI and an unattended deploy expect.
+#
+#   paper-armed  Deliberately armed for PAPER trading. Chosen explicitly by an
+#                operator at the shell:
+#
+#                    DEPLOY_POSTURE=paper-armed bash scripts/deploy.sh main
+#
+# This is not a bypass, and `paper-armed` is not "skip the checks". It is a
+# DIFFERENT set of checks for a different intended state, and several of them
+# are stricter than the halted ones: limits that are zero mean NOT CONFIGURED,
+# which is a refusal, so an armed system with a zero limit is misconfigured
+# rather than safe. Sanity ceilings catch the fat-fingered extra zero.
+#
+# There is deliberately NO `live-armed` posture. LIVE_TRADING_ENABLED=false and
+# TRADING_MODE != live are asserted under BOTH postures, so no value of this
+# variable can approve a live configuration.
+#
+# Defaulting to `halted` matters: a deploy that forgets to say what it wants
+# gets the refusing answer, and `.github/workflows/deploy.yml` never sets it.
+# -----------------------------------------------------------------------------
+POSTURE="${2:-${DEPLOY_POSTURE:-halted}}"
+case "$POSTURE" in
+    halted|paper-armed) ;;
+    *)
+        echo "  [FAIL] unknown posture '$POSTURE' (expected 'halted' or 'paper-armed')" >&2
+        exit 2
+        ;;
+esac
+
 FAILURES=0
 WARNINGS=0
 
@@ -41,6 +75,28 @@ expect() {
         fail "$name='$got' (expected '$want')"
     else
         pass "$name=$got"
+    fi
+}
+
+# A limit that is set, positive, and not absurd. Zero is NOT acceptable in an
+# armed posture: zero means NOT CONFIGURED, which the risk manager treats as
+# "trading not authorised", so an armed system carrying one would refuse every
+# order while looking configured. The ceiling exists to catch an extra zero,
+# not to express a view on position sizing -- raise it here, deliberately, when
+# the phase moves on.
+expect_within() {
+    local name="$1" ceiling="$2" got
+    got="$(value_of "$name")"
+    if [ -z "$got" ]; then
+        fail "$name is not set (armed posture requires 1..$ceiling)"
+    elif ! printf '%s' "$got" | grep -qE '^[0-9]+$'; then
+        fail "$name='$got' is not a whole number"
+    elif [ "$got" -eq 0 ]; then
+        fail "$name=0 means NOT CONFIGURED, which refuses every order; an armed system needs a real limit"
+    elif [ "$got" -gt "$ceiling" ]; then
+        fail "$name='$got' exceeds the $ceiling ceiling for a paper-armed posture -- an extra digit?"
+    else
+        pass "$name=$got (within $ceiling)"
     fi
 }
 
@@ -98,19 +154,70 @@ echo "  [ ok ] $ENV_FILE defines $VARIABLE_COUNT variables"
 echo
 
 # -----------------------------------------------------------------------------
-echo "Interlocks:"
-expect TRADING_MODE                 mock
-expect ALLOW_ORDER_TRANSMIT         false
-expect LIVE_TRADING_ENABLED         false
-expect KILL_SWITCH                  true
-expect SOL_FUTURES_PERMISSION_READY false
-
+echo "Posture: $POSTURE"
 echo
-echo "Risk limits (0 = not configured = trading not authorised):"
-for var in MAX_POSITION_CONTRACTS MAX_ORDER_SIZE MAX_DAILY_LOSS_USD \
-           MAX_ORDERS_PER_HOUR MAX_OPEN_ORDERS MAX_NOTIONAL_EXPOSURE_USD; do
-    expect "$var" 0
-done
+echo "Interlocks:"
+
+# Asserted under EVERY posture. Nothing this script can be asked for approves a
+# live configuration.
+expect LIVE_TRADING_ENABLED false
+if [ "$(value_of TRADING_MODE)" = "live" ]; then
+    fail "TRADING_MODE=live is never approved by this script, under any posture"
+fi
+
+if [ "$POSTURE" = "halted" ]; then
+    expect TRADING_MODE                 mock
+    expect ALLOW_ORDER_TRANSMIT         false
+    expect KILL_SWITCH                  true
+    expect SOL_FUTURES_PERMISSION_READY false
+
+    echo
+    echo "Risk limits (0 = not configured = trading not authorised):"
+    for var in MAX_POSITION_CONTRACTS MAX_ORDER_SIZE MAX_DAILY_LOSS_USD \
+               MAX_ORDERS_PER_HOUR MAX_OPEN_ORDERS MAX_NOTIONAL_EXPOSURE_USD; do
+        expect "$var" 0
+    done
+else
+    expect TRADING_MODE                 paper
+    expect ALLOW_ORDER_TRANSMIT         true
+    expect SOL_FUTURES_PERMISSION_READY true
+
+    # The kill switch may legitimately be either way here. Engaged means armed
+    # but halted, which is a real and useful state -- and the database latch can
+    # engage it independently of this file, so demanding a value would report a
+    # failure for a system behaving correctly.
+    ks="$(value_of KILL_SWITCH)"
+    case "$ks" in
+        false) pass "KILL_SWITCH=false (armed)" ;;
+        true)  warn "KILL_SWITCH=true: armed but halted, so no order will be sent" ;;
+        *)     fail "KILL_SWITCH='$ks' (expected 'true' or 'false')" ;;
+    esac
+
+    echo
+    echo "Risk limits (must be configured, and sane, in an armed posture):"
+    expect_within MAX_ORDER_SIZE              5
+    expect_within MAX_POSITION_CONTRACTS      5
+    expect_within MAX_OPEN_ORDERS             5
+    expect_within MAX_ORDERS_PER_HOUR        20
+    expect_within MAX_DAILY_LOSS_USD       5000
+    expect_within MAX_NOTIONAL_EXPOSURE_USD 100000
+
+    # Freshness is an interlock, not a limit: zero means the gate refuses every
+    # order for MARKET_DATA_MAX_AGE_NOT_CONFIGURED. An armed system with it
+    # unset is armed and inert.
+    age="$(value_of MARKET_DATA_MAX_AGE_SECONDS)"
+    if [ -z "$age" ] || [ "$age" = "0" ]; then
+        fail "MARKET_DATA_MAX_AGE_SECONDS is 0 or unset; the gate refuses every order without it"
+    else
+        pass "MARKET_DATA_MAX_AGE_SECONDS=$age"
+    fi
+
+    if [ -z "$(value_of DEFAULT_CONTRACT_MONTH)" ]; then
+        fail "DEFAULT_CONTRACT_MONTH is not set; an expiration is never chosen implicitly"
+    else
+        pass "DEFAULT_CONTRACT_MONTH=$(value_of DEFAULT_CONTRACT_MONTH)"
+    fi
+fi
 
 echo
 echo "File permissions:"
@@ -191,6 +298,12 @@ if [ "$FAILURES" -gt 0 ]; then
     echo "This configuration is NOT the approved state for this phase."
     exit 1
 fi
-echo "RESULT: safe. $WARNINGS warning(s)."
-echo "Live orders cannot be transmitted with this configuration."
+echo "RESULT: safe for posture '$POSTURE'. $WARNINGS warning(s)."
+if [ "$POSTURE" = "halted" ]; then
+    echo "No orders can be transmitted with this configuration."
+else
+    echo "ARMED FOR PAPER TRADING. This configuration CAN send orders to IBKR's"
+    echo "paper account. Live trading remains blocked: LIVE_TRADING_ENABLED=false"
+    echo "and TRADING_MODE is not live."
+fi
 exit 0
