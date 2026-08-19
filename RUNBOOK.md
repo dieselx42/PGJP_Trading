@@ -823,11 +823,16 @@ rather than refusing: initial margin $1,179.88, maintenance $1,025.98,
 commission $3.41 on a 1-lot MSLQ6. A permission-blocked account returns
 `10187`/`10276`/`460` there instead.
 
-Set **small** limits first:
+**Edit the server `.env` by hand** — `nano /opt/sol-futures-trading-bot/.env`.
+These keys already exist, so change them in place; appending creates duplicates
+and the *last* one wins, which is a confusing way to find out you edited the
+wrong line. Deploy never writes this file, by design.
 
 ```ini
+TRADING_MODE=paper
 SOL_FUTURES_PERMISSION_READY=true
 MARKET_DATA_MAX_AGE_SECONDS=30
+DEFAULT_CONTRACT_MONTH=20260828
 MAX_ORDER_SIZE=1
 MAX_POSITION_CONTRACTS=1
 MAX_DAILY_LOSS_USD=100
@@ -838,7 +843,32 @@ ALLOW_ORDER_TRANSMIT=true
 KILL_SWITCH=false
 ```
 
-Restart and confirm `application.state` is `READY`.
+Then deploy, **naming the posture you intend**:
+
+```bash
+DEPLOY_POSTURE=paper-armed bash scripts/deploy.sh main
+```
+
+Without that variable the deploy checks for the halted posture, finds ten
+differences, and refuses — which is correct, and is what it does for a deploy
+that was not supposed to arm anything. `paper-armed` is not "skip the checks":
+it is a different set, and several are *stricter*. A limit left at `0` fails,
+because zero means NOT CONFIGURED and an armed system carrying one would refuse
+every order while looking ready. Sanity ceilings catch a fat-fingered extra
+digit. No posture approves a live configuration.
+
+Confirm the running process agrees:
+
+```bash
+docker compose exec -T sol-trading-bot python -m app.cli status
+```
+
+Want `application_state: READY` — reachable only through successful
+reconciliation, so it doubles as proof that `get_open_orders` works in the real
+runtime and not only in the checkout.
+
+`app.cli verify` will now report `POSTURE_NOT_APPROVED`. That is expected: it
+checks the halted posture specifically, and you have deliberately left it.
 
 #### The first order is sent by hand, not by a strategy
 
