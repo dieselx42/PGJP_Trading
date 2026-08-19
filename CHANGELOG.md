@@ -162,6 +162,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had never returned a green result before that run — which is not the same
   thing as a probe that returns green, and is worth distinguishing.
 
+- **Closing a position was inexpressible.** `TradeIntent.is_actionable`
+  returned `False` for every `FLAT`/`0` target, on the reasoning that
+  "FLAT-to-flat intents carry no work" — true only if you are *already* flat,
+  which an intent cannot know. The target is the destination; whether work is
+  required depends on the origin.
+
+  So the validator rejected every exit as `SIGNAL_NOT_ACTIONABLE`, while risk
+  and the gate had already computed the correct `SELL 1`. The system could open
+  a position and had no way to say "close it". Found trying to close the first
+  position it ever held. A unit test asserted the broken behaviour as correct.
+
+  Replaced by `requires_order_from(current_position)`, and the validator no
+  longer asks: it validates the *shape* of a signal, not the state of the book.
+  The genuine no-op — a target already held — is caught downstream where the
+  position is known, by a computed quantity of zero and `NO_CHANGE`.
+
+- **`place-order` reported `SUBMITTED` for orders it had not submitted**, and
+  described an order that never reached the broker as "no status yet, it may
+  well be working". Both are now reported for what they are: `NOT_SUBMITTED`,
+  and a note pointing at whichever approver refused.
+
 - **A fill never moved the position book, and the resulting discrepancy could
   never clear.** Three things combined, found within minutes of the first fill
   this system produced:

@@ -324,3 +324,86 @@ class TestTargetsNotDeltas:
         plan = report["plan"]
         assert isinstance(plan, dict)
         assert plan["resulting_order"] is None
+
+
+class TestClosingAPosition:
+    """Closing was inexpressible.
+
+    `TradeIntent.is_actionable` treated every FLAT/0 target as carrying no
+    work -- true only if you are already flat, which the intent cannot know.
+    The validator therefore rejected every exit as `SIGNAL_NOT_ACTIONABLE`
+    while risk and the gate had already computed the correct SELL.
+
+    Found 2026-08-19 trying to close the first position this system held:
+    it could open a position and had no way to say "close it".
+    """
+
+    @pytest.mark.safety
+    async def test_a_close_from_a_long_is_transmitted(self) -> None:
+        config = _config()
+        symbol = await _local_symbol(config)
+
+        opened = await place_operator_order(config, _request(confirm=symbol, target_position=1))
+        assert opened["result"] == "SUBMITTED", opened
+
+        closed = await place_operator_order(config, _request(confirm=symbol, target_position=0))
+
+        approvals = closed["approvals"]
+        assert isinstance(approvals, dict)
+        assert approvals["signal_validation"] == {"accepted": True, "reasons": []}, (
+            "a FLAT intent is how every exit is written; rejecting it makes closing "
+            "a position impossible"
+        )
+
+    @pytest.mark.safety
+    def test_a_flat_target_from_a_long_becomes_a_sell(self) -> None:
+        """The other half: validation now permits it, and it computes a SELL.
+
+        Asserted directly rather than by opening a position first -- each
+        `place_operator_order` builds its own in-memory database, so a position
+        cannot carry between two calls in this harness. Testing it that way
+        would have passed for the wrong reason.
+        """
+        from app.enums import OrderSide
+        from app.execution.order_manager import OrderManager
+
+        side, quantity = OrderManager.delta_to_side_and_quantity(
+            current_position=1, requested_position=0
+        )
+        assert side is OrderSide.SELL
+        assert quantity == 1
+
+    def test_a_flat_target_from_flat_is_no_work(self) -> None:
+        from app.execution.order_manager import OrderManager
+
+        _, quantity = OrderManager.delta_to_side_and_quantity(
+            current_position=0, requested_position=0
+        )
+        assert quantity == 0
+
+
+class TestTheReportDoesNotOverclaim:
+    """It said SUBMITTED for an order the validator had refused."""
+
+    @pytest.mark.safety
+    async def test_a_refused_order_is_not_reported_as_submitted(self) -> None:
+        config = _config(MAX_ORDER_SIZE="1")
+        symbol = await _local_symbol(config)
+
+        report = await place_operator_order(config, _request(confirm=symbol, target_position=5))
+
+        assert report["result"] == "NOT_SUBMITTED"
+        assert report["transmitted"] is False
+
+    @pytest.mark.safety
+    async def test_an_unsent_order_is_not_described_as_maybe_working(self) -> None:
+        """ "No status yet, it may well be working" about an order never sent."""
+        config = _config(MAX_ORDER_SIZE="1")
+        symbol = await _local_symbol(config)
+
+        report = await place_operator_order(config, _request(confirm=symbol, target_position=5))
+
+        note = report["broker_status_note"]
+        assert isinstance(note, str)
+        assert "no order reached the broker" in note
+        assert "may well" not in note

@@ -71,6 +71,7 @@ RESULT_CONFIRM_MISMATCH = "CONFIRMATION_MISMATCH"
 RESULT_NOT_CONNECTED = "BROKER_NOT_CONNECTED"
 RESULT_NO_CONTRACT = "NO_QUALIFIED_CONTRACT"
 RESULT_SUBMITTED = "SUBMITTED"
+RESULT_NOT_SUBMITTED = "NOT_SUBMITTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +286,12 @@ async def _run(app: Any, request: OperatorOrderRequest) -> dict[str, object]:
     # success for an order IBKR accepted and immediately cancelled, because the
     # placing client had gone away. An order's fate is a fact about the broker,
     # not about our send call.
-    status = await _await_broker_status(app, outcome)
+    # Only ask the broker about an order that actually reached it. Reporting
+    # "no status yet, it may well be working" for an order that was never sent
+    # is the same class of untruth as reporting SUBMITTED for one the validator
+    # refused -- both were doing it.
+    transmitted = bool(outcome is not None and outcome.transmitted)
+    status = await _await_broker_status(app, outcome) if transmitted else None
 
     # A fill changes the position. Re-reconcile so the fill is recorded and the
     # book reflects it -- otherwise this command leaves the broker holding a
@@ -303,13 +309,13 @@ async def _run(app: Any, request: OperatorOrderRequest) -> dict[str, object]:
         reconciled_after = app.reconciliation.describe()
 
     return {
-        "result": RESULT_SUBMITTED,
-        "transmitted": bool(outcome is not None and outcome.order is not None),
+        "result": RESULT_SUBMITTED if transmitted else RESULT_NOT_SUBMITTED,
+        "transmitted": transmitted,
         "plan": plan,
         "approvals": approvals,
         "outcome": None if outcome is None else outcome.describe(),
         "broker_status": None if status is None else status.describe(),
-        "broker_status_note": _status_note(status),
+        "broker_status_note": _status_note(status, transmitted=transmitted),
         "reconciliation_after_fill": reconciled_after,
         "position_after": [p.describe() for p in app.position_book.all()],
     }
@@ -340,7 +346,12 @@ async def _await_broker_status(app: Any, outcome: Any) -> Any:
     return status
 
 
-def _status_note(status: Any) -> str:
+def _status_note(status: Any, *, transmitted: bool = True) -> str:
+    if not transmitted:
+        return (
+            "no order reached the broker, so there is no status to report. The reason is "
+            "in `approvals` above -- one of the three approvers refused."
+        )
     if status is None:
         return (
             "the broker sent no status within the wait. UNDETERMINED -- the order may well "

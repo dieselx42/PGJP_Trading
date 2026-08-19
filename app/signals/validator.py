@@ -26,7 +26,6 @@ REASON_SYMBOL_MISMATCH = "SIGNAL_SYMBOL_NOT_CONFIGURED_INSTRUMENT"
 REASON_DUPLICATE = "DUPLICATE_SIGNAL"
 REASON_STALE = "SIGNAL_TIMESTAMP_STALE"
 REASON_FUTURE = "SIGNAL_TIMESTAMP_IN_FUTURE"
-REASON_NOT_ACTIONABLE = "SIGNAL_NOT_ACTIONABLE"
 REASON_STRATEGY_MISMATCH = "SIGNAL_FROM_UNKNOWN_STRATEGY"
 REASON_POSITION_UNREASONABLE = "SIGNAL_REQUESTED_POSITION_UNREASONABLE"
 
@@ -86,8 +85,16 @@ class SignalValidator:
         elif age > self._max_signal_age_seconds:
             reasons.append(REASON_STALE)
 
-        if not intent.is_actionable:
-            reasons.append(REASON_NOT_ACTIONABLE)
+        # No actionability check here, deliberately. Whether an intent implies
+        # an order depends on the CURRENT POSITION, which this validator does
+        # not have and should not: it validates the shape of a signal, not the
+        # state of the book. The genuine no-op -- a target we already hold --
+        # is caught downstream, where the position is known, by
+        # `OrderManager.delta_to_side_and_quantity` returning a quantity of 0
+        # and `submit_intent` reporting NO_CHANGE.
+        #
+        # Asking it here rejected every "be flat" intent, which is how every
+        # exit is expressed.
 
         if abs(intent.requested_position) > ABSOLUTE_POSITION_SANITY_LIMIT:
             reasons.append(REASON_POSITION_UNREASONABLE)
@@ -115,7 +122,6 @@ __all__ = [
     "DEFAULT_MAX_SIGNAL_AGE_SECONDS",
     "REASON_DUPLICATE",
     "REASON_FUTURE",
-    "REASON_NOT_ACTIONABLE",
     "REASON_POSITION_UNREASONABLE",
     "REASON_STALE",
     "REASON_STRATEGY_MISMATCH",
