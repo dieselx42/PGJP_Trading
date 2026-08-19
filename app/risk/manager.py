@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
 from app.config import Config
@@ -22,6 +23,7 @@ from app.logging_config import get_logger
 from app.risk import limits as limit_checks
 from app.safety.gate import expected_account_type
 from app.signals.models import TradeIntent
+from app.utilities.timeutils import utc_now
 
 _LOG = get_logger("risk.manager")
 
@@ -39,6 +41,7 @@ REASON_POSITIONS_NOT_RECONCILED = "POSITIONS_NOT_RECONCILED"
 REASON_ORDERS_NOT_RECONCILED = "OPEN_ORDERS_NOT_RECONCILED"
 REASON_CONTRACT_NOT_QUALIFIED = "CONTRACT_NOT_QUALIFIED"
 REASON_CONTRACT_CONTINUOUS = "CONTRACT_IS_CONTINUOUS_FUTURE"
+REASON_CONTRACT_EXPIRED = "CONTRACT_PAST_LAST_TRADE_DATE"
 REASON_MARKET_DATA_MISSING = "MARKET_DATA_UNAVAILABLE"
 REASON_MARKET_DATA_STALE = "MARKET_DATA_STALE"
 REASON_MARKET_DATA_AGE_NOT_CONFIGURED = "MARKET_DATA_MAX_AGE_NOT_CONFIGURED"
@@ -105,6 +108,15 @@ class RiskContext:
     strategy_enabled: bool = False
     kill_switch_engaged: bool = True
     duplicate_order_exists: bool = False
+
+    today: date = field(default_factory=lambda: utc_now().date())
+    """The date the contract's expiry is judged against.
+
+    Defaulted rather than required so every existing caller keeps working, and
+    defaulted to *now* rather than to a sentinel: a context that says nothing
+    about the date should be judged against the real one, which is the answer
+    that refuses an expired contract.
+    """
 
     @property
     def projected_position(self) -> int:
@@ -205,6 +217,11 @@ class RiskManager:
             reasons.append(REASON_CONTRACT_CONTINUOUS)
         if contract.con_id <= 0:
             reasons.append(REASON_CONTRACT_NOT_QUALIFIED)
+        # Checked here from the contract itself, independently of whatever the
+        # caller put in the gate context. Two approvers that read the same
+        # field from the same place are one approver wearing two hats.
+        if contract.is_expired(context.today):
+            reasons.append(REASON_CONTRACT_EXPIRED)
 
     def _check_market_data(self, context: RiskContext, reasons: list[str]) -> None:
         max_age = self._config.market_data_max_age_seconds

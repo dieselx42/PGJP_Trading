@@ -330,6 +330,52 @@ async def test_the_gate_refuses_even_with_a_perfect_session():
     # Every session-side condition was forced green, so the refusals must all
     # come from the deployed configuration rather than from session state.
     assert gate.evidence["reasons"]
+    session_side = {
+        "APPLICATION_NOT_READY",
+        "BROKER_NOT_CONNECTED",
+        "ACCOUNT_DATA_UNAVAILABLE",
+        "CONTRACT_NOT_QUALIFIED",
+        "CONTRACT_IS_CONTINUOUS_FUTURE",
+        "CONTRACT_PAST_LAST_TRADE_DATE",
+        "POSITIONS_NOT_RECONCILED",
+        "OPEN_ORDERS_NOT_RECONCILED",
+        "MARKET_DATA_UNAVAILABLE",
+        "MARKET_DATA_STALE",
+        "MARKET_DATA_IS_DELAYED",
+        "STRATEGY_DISABLED",
+        "RISK_CHECKS_NOT_PASSED",
+    }
+    leaked = session_side & set(gate.evidence["reasons"])
+    assert not leaked, f"a session-side field was left refusing, masking the config: {leaked}"
+
+
+async def test_the_gate_probe_would_report_a_configuration_that_permits():
+    """The control. Without it the probe passes by refusing for the wrong reason.
+
+    Every session-side field in the optimistic context must be set to the value
+    that *helps* an order through. If any is left at its refusing default -- as
+    `contract_expired` was when the expiry interlock was added -- the probe
+    still says "the gate refuses" and still passes, while no longer testing the
+    configuration at all.
+
+    So: hand it a configuration that genuinely permits, and require the probe
+    to notice. Only a fully-green session context can produce that.
+    """
+    from app.broker.checkout import _gate_probe
+
+    permissive = paper_config(
+        KILL_SWITCH="false",
+        ALLOW_ORDER_TRANSMIT="true",
+        SOL_FUTURES_PERMISSION_READY="true",
+        MARKET_DATA_MAX_AGE_SECONDS="30",
+    )
+
+    result = _gate_probe(permissive)
+
+    assert result.evidence["allowed"] is True, (
+        "the gate refused with everything green; a session-side field is still refusing"
+    )
+    assert result.ok is False, "and the probe must report that as a failure"
 
 
 # ---------------------------------------------------------------------------

@@ -133,6 +133,7 @@ def all_green_gate_context(**overrides: object) -> GateContext:
         "broker_account_type": AccountType.SIMULATED,
         "contract_qualified": True,
         "contract_is_continuous": False,
+        "contract_expired": False,
         "account_available": True,
         "positions_reconciled": True,
         "open_orders_reconciled": True,

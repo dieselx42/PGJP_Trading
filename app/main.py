@@ -678,6 +678,9 @@ class TradingApplication:
             broker_account_type=self._account_type(),
             contract_qualified=contract is not None and contract.con_id > 0,
             contract_is_continuous=contract.is_continuous if contract is not None else True,
+            contract_expired=(
+                contract.is_expired(utc_now().date()) if contract is not None else True
+            ),
             account_available=self.account is not None,
             positions_reconciled=self.reconciliation.positions_reconciled,
             open_orders_reconciled=self.reconciliation.orders_reconciled,

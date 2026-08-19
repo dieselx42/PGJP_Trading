@@ -43,6 +43,7 @@ REASON_APP_NOT_READY = "APPLICATION_NOT_READY"
 REASON_BROKER_NOT_CONNECTED = "BROKER_NOT_CONNECTED"
 REASON_CONTRACT_NOT_QUALIFIED = "CONTRACT_NOT_QUALIFIED"
 REASON_CONTRACT_IS_CONTINUOUS = "CONTRACT_IS_CONTINUOUS_FUTURE"
+REASON_CONTRACT_EXPIRED = "CONTRACT_PAST_LAST_TRADE_DATE"
 REASON_ACCOUNT_UNAVAILABLE = "ACCOUNT_DATA_UNAVAILABLE"
 REASON_POSITIONS_NOT_RECONCILED = "POSITIONS_NOT_RECONCILED"
 REASON_ORDERS_NOT_RECONCILED = "OPEN_ORDERS_NOT_RECONCILED"
@@ -74,6 +75,11 @@ class GateContext:
 
     contract_qualified: bool = False
     contract_is_continuous: bool = True
+
+    #: Whether the contract is past its last trade date. Defaults to True --
+    #: the unsafe answer -- so a caller that does not establish the expiry gets
+    #: a refusal rather than an assumption that the contract is still alive.
+    contract_expired: bool = True
     account_available: bool = False
     positions_reconciled: bool = False
     open_orders_reconciled: bool = False
@@ -195,6 +201,13 @@ class TransmitGate:
             # A continuous future is an analytics construct. It is not
             # deliverable and must never carry an order.
             reasons.append(REASON_CONTRACT_IS_CONTINUOUS)
+        if context.contract_expired:
+            # Past its last trade date the contract does not exist to trade.
+            # Without this the system keeps sending orders the broker keeps
+            # rejecting, which is both useless and against the rule about not
+            # retrying rejected orders. Rolling to the next month is a
+            # deliberate operator decision, never something that happens here.
+            reasons.append(REASON_CONTRACT_EXPIRED)
 
     def _check_reconciliation(self, context: GateContext, reasons: list[str]) -> None:
         if not context.positions_reconciled:

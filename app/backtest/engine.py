@@ -520,6 +520,10 @@ class BacktestEngine:
             strategy_enabled=self.strategy.enabled,
             kill_switch_engaged=False,
             duplicate_order_exists=False,
+            # The virtual clock, not the wall clock. Judging a historical bar
+            # against today would refuse every replay the moment the contract
+            # it prices against expires.
+            today=bar.opened_at.date(),
         )
         risk = self.risk_manager.evaluate(risk_context)
         # The gate is evaluated even when risk has already refused. Skipping it
@@ -535,6 +539,11 @@ class BacktestEngine:
                 broker_account_type=AccountType.SIMULATED,
                 contract_qualified=True,
                 contract_is_continuous=self.contract.is_continuous,
+                # A replay is judged against the bar it is on, not today.
+                # Using the wall clock would make every historical run refuse
+                # as soon as the contract it prices against expires, which is
+                # exactly when a replay is most useful.
+                contract_expired=self.contract.is_expired(bar.opened_at.date()),
                 account_available=True,
                 positions_reconciled=True,
                 open_orders_reconciled=True,

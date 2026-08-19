@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 
 from app.enums import SecurityType
@@ -131,6 +132,45 @@ class QualifiedContract:
     @property
     def is_continuous(self) -> bool:
         return False
+
+    def expiry_date(self) -> date | None:
+        """Last trade date, or ``None`` when it cannot be determined.
+
+        ``None`` is a refusal, not a shrug: a caller that cannot establish
+        when a contract stops trading must not trade it. IBKR reports
+        ``lastTradeDateOrContractMonth`` on every qualified future, so this
+        returning ``None`` means the field was malformed and something is
+        wrong that guessing would hide.
+
+        A bare ``YYYYMM`` is deliberately NOT accepted here. Assuming the last
+        day of the month would keep a dead contract tradeable for weeks, and
+        assuming the first would refuse a live one; neither is a fact, and this
+        function only reports facts.
+        """
+        for raw in (self.last_trade_date, self.expiration):
+            if raw and len(raw) == 8 and raw.isdigit():
+                try:
+                    return date(int(raw[0:4]), int(raw[4:6]), int(raw[6:8]))
+                except ValueError:
+                    continue
+        return None
+
+    def is_expired(self, on: date) -> bool:
+        """Whether this contract has stopped trading by ``on``.
+
+        Fails closed twice over: an undeterminable expiry counts as expired,
+        and the comparison is strictly *after* the last trade date, so the
+        final session stays tradeable. Refusing on the last day would strand
+        any position held into it -- the operator could not flatten, which is
+        the one thing that must always be possible.
+        """
+        expiry = self.expiry_date()
+        return expiry is None or on > expiry
+
+    def days_until_expiry(self, on: date) -> int | None:
+        """Sessions remaining, negative once past. ``None`` if undeterminable."""
+        expiry = self.expiry_date()
+        return None if expiry is None else (expiry - on).days
 
     @property
     def multiplier_decimal(self) -> Decimal:

@@ -591,6 +591,7 @@ def _gate_probe(config: Config) -> Probe:
         broker_account_type=AccountType.PAPER,
         contract_qualified=True,
         contract_is_continuous=False,
+        contract_expired=False,
         account_available=True,
         positions_reconciled=True,
         open_orders_reconciled=True,

@@ -32,7 +32,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -154,11 +154,14 @@ def cmd_contract_info(config: Config, args: argparse.Namespace) -> int:
     database, repos = _open_database(config)
     try:
         contracts = repos.contracts.all()
+        today = utc_now().date()
+        expiry = _configured_contract_expiry(repos, config, today)
         _emit(
             {
                 "configured_symbol": config.default_futures_symbol,
                 "configured_exchange": config.default_exchange,
                 "configured_contract_month": config.default_contract_month,
+                "expiry": expiry,
                 "note": (
                     "an order can only be built against a broker-qualified dated contract; "
                     "continuous futures are never orderable"
@@ -169,6 +172,54 @@ def cmd_contract_info(config: Config, args: argparse.Namespace) -> int:
     finally:
         database.close()
     return EXIT_OK
+
+
+#: How close to expiry counts as "act now". A futures contract that lapses
+#: under an armed system is a silent halt: every order is refused and the only
+#: sign is a rejection reason nobody is reading.
+_EXPIRY_WARNING_DAYS = 14
+
+
+def _configured_contract_expiry(
+    repos: Repositories, config: Config, today: date
+) -> dict[str, object]:
+    """When the configured contract stops trading, and what to do about it.
+
+    Reported wherever an operator is already looking, because the alternative
+    is finding out on the day every order starts being refused.
+    """
+    contract = repos.contracts.find(config.default_futures_symbol, config.default_contract_month)
+    if contract is None:
+        return {
+            "known": False,
+            "detail": (
+                "no stored qualification for the configured contract; "
+                "run `ibkr-checkout --contract-month YYYYMM`"
+            ),
+        }
+
+    days = contract.days_until_expiry(today)
+    expired = contract.is_expired(today)
+    payload: dict[str, object] = {
+        "known": True,
+        "local_symbol": contract.local_symbol,
+        "last_trade_date": contract.last_trade_date,
+        "days_remaining": days,
+        "expired": expired,
+    }
+    if expired:
+        payload["action"] = (
+            "EXPIRED. Every order is now refused by both approvers. Qualify the next "
+            "contract with `ibkr-checkout --contract-month YYYYMM`, flatten any position "
+            "in this one, then update DEFAULT_CONTRACT_MONTH in .env and redeploy. "
+            "Rolling is never automatic."
+        )
+    elif days is not None and days <= _EXPIRY_WARNING_DAYS:
+        payload["action"] = (
+            f"EXPIRES IN {days} DAY(S). After the last trade date every order is refused. "
+            "Qualify the next contract and update DEFAULT_CONTRACT_MONTH before then."
+        )
+    return payload
 
 
 def cmd_kill_switch_status(config: Config, args: argparse.Namespace) -> int:

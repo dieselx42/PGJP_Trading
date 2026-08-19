@@ -379,3 +379,95 @@ class TestBadInput:
 
         assert code == EXIT_ERROR
         assert payload["result"] == "INVALID_FILL_MODEL"
+
+
+class TestContractExpiryIsVisible:
+    """MSLQ6 expires 2026-08-28 and nothing was checking.
+
+    An armed system whose contract lapses is a silent halt: both approvers
+    start refusing every order, and the only sign is a rejection reason nobody
+    is reading. So it is reported where an operator is already looking.
+    """
+
+    def _store_and_read(
+        self,
+        db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        *,
+        days_from_today: int,
+    ) -> dict:
+        month = (datetime.now(UTC).date() + timedelta(days=days_from_today)).strftime("%Y%m%d")
+        database = Database(db_path)
+        database.connect()
+        Repositories(database).contracts.upsert(
+            QualifiedContract(
+                con_id=999000111,
+                symbol="MSL",
+                local_symbol="MSLQ6",
+                sec_type=SecurityType.FUTURE,
+                exchange="CME",
+                currency="USD",
+                expiration=month,
+                last_trade_date=month,
+                multiplier="25",
+                min_tick=Decimal("0.05"),
+                trading_class="MSL",
+            )
+        )
+        database.close()
+        monkeypatch.setenv("DEFAULT_CONTRACT_MONTH", month)
+        _, payload = _run(capsys, "contract-info")
+        return payload["expiry"]
+
+    def test_a_distant_expiry_needs_no_action(
+        self,
+        backtest_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        expiry = self._store_and_read(backtest_env, monkeypatch, capsys, days_from_today=200)
+
+        assert expiry["known"] is True
+        assert expiry["expired"] is False
+        assert expiry["days_remaining"] == 200
+        assert "action" not in expiry
+
+    def test_a_near_expiry_says_what_to_do(
+        self,
+        backtest_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        expiry = self._store_and_read(backtest_env, monkeypatch, capsys, days_from_today=8)
+
+        assert expiry["expired"] is False
+        assert "EXPIRES IN 8 DAY(S)" in expiry["action"]
+        assert "DEFAULT_CONTRACT_MONTH" in expiry["action"]
+
+    def test_a_lapsed_contract_says_every_order_is_refused(
+        self,
+        backtest_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        expiry = self._store_and_read(backtest_env, monkeypatch, capsys, days_from_today=-3)
+
+        assert expiry["expired"] is True
+        assert expiry["days_remaining"] == -3
+        assert "EXPIRED" in expiry["action"]
+        assert "refused by both approvers" in expiry["action"]
+        assert "never automatic" in expiry["action"]
+
+    def test_an_unqualified_contract_says_so_rather_than_guessing(
+        self,
+        backtest_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """No stored qualification for the configured month: say so, guess nothing."""
+        monkeypatch.setenv("DEFAULT_CONTRACT_MONTH", "20991231")
+        _, payload = _run(capsys, "contract-info")
+
+        assert payload["expiry"]["known"] is False
+        assert "ibkr-checkout" in payload["expiry"]["detail"]

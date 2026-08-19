@@ -212,10 +212,31 @@ else
         pass "MARKET_DATA_MAX_AGE_SECONDS=$age"
     fi
 
-    if [ -z "$(value_of DEFAULT_CONTRACT_MONTH)" ]; then
+    contract_month="$(value_of DEFAULT_CONTRACT_MONTH)"
+    if [ -z "$contract_month" ]; then
         fail "DEFAULT_CONTRACT_MONTH is not set; an expiration is never chosen implicitly"
     else
-        pass "DEFAULT_CONTRACT_MONTH=$(value_of DEFAULT_CONTRACT_MONTH)"
+        pass "DEFAULT_CONTRACT_MONTH=$contract_month"
+        # An armed system whose contract lapses is a silent halt: both approvers
+        # start refusing every order, and the only sign is a rejection reason
+        # nobody is reading. Warned here because a deploy is where somebody is
+        # actually looking. Rolling stays a deliberate decision -- this only
+        # ever tells you; it never edits .env.
+        if printf '%s' "$contract_month" | grep -qE '^[0-9]{8}$'; then
+            today_epoch=$(date -u +%s)
+            expiry_epoch=$(date -u -d "$contract_month" +%s 2>/dev/null \
+                || date -u -j -f '%Y%m%d' "$contract_month" +%s 2>/dev/null || echo "")
+            if [ -n "$expiry_epoch" ]; then
+                days_left=$(( (expiry_epoch - today_epoch) / 86400 ))
+                if [ "$days_left" -lt 0 ]; then
+                    fail "contract $contract_month EXPIRED $(( -days_left )) day(s) ago; every order will be refused. Qualify the next month, flatten any position, then update DEFAULT_CONTRACT_MONTH."
+                elif [ "$days_left" -le 14 ]; then
+                    warn "contract $contract_month expires in $days_left day(s); qualify the next month and update DEFAULT_CONTRACT_MONTH before then"
+                else
+                    pass "contract $contract_month has $days_left day(s) to expiry"
+                fi
+            fi
+        fi
     fi
 fi
 

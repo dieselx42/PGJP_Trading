@@ -11,6 +11,7 @@ refuses unconditionally would satisfy all of them.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -18,12 +19,14 @@ import pytest
 from app.broker.mock_broker import MockBroker
 from app.broker.models import BrokerOrderRejectedError, OrderRequest
 from app.config import Config
+from app.contracts.models import QualifiedContract
 from app.enums import (
     AccountType,
     ApplicationState,
     ConnectionState,
     OrderSide,
     OrderType,
+    SecurityType,
     TradingMode,
 )
 from app.execution.order_manager import (
@@ -599,3 +602,106 @@ def test_11_a_caller_that_does_not_know_is_treated_as_delayed() -> None:
     from app.safety.gate import GateContext
 
     assert GateContext().market_data_is_delayed is True
+
+
+# ---------------------------------------------------------------------------
+# 12. A contract past its last trade date can never carry an order
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.safety
+def test_12_an_expired_contract_rejects_every_order() -> None:
+    """Found with MSLQ6 nine days from expiry and the system armed for paper.
+
+    Nothing in the gate, the risk manager or the runtime compared a contract's
+    last trade date to anything. Past expiry the contract does not exist to
+    trade: IBKR rejects every order, and the system would have kept sending
+    them -- useless, and against the rule about not retrying rejected orders.
+
+    Rolling to the next month stays a deliberate operator decision. This
+    interlock only ever refuses.
+    """
+    config = Config.from_env(permissive_env())
+    context = all_green_gate_context(contract_expired=True)
+
+    decision = TransmitGate(config).evaluate(context)
+
+    assert decision.allowed is False
+    assert "CONTRACT_PAST_LAST_TRADE_DATE" in decision.reasons
+
+
+@pytest.mark.safety
+def test_12_a_caller_that_does_not_know_the_expiry_is_refused() -> None:
+    """The default is the refusing one, as with every other GateContext field."""
+    from app.safety.gate import GateContext
+
+    assert GateContext().contract_expired is True
+
+
+@pytest.mark.safety
+def test_12_risk_manager_checks_expiry_from_the_contract_itself(contract) -> None:
+    """Independently of the gate context, and of whatever the caller believed.
+
+    Two approvers reading the same field from the same place are one approver
+    wearing two hats. Risk derives this from the contract object it was handed.
+    """
+    from datetime import date
+
+    config = Config.from_env(permissive_env())
+    expiry = date(2026, 12, 18)  # the fixture's last trade date
+
+    after = RiskManager(config).evaluate(
+        all_green_risk_context(contract, today=expiry + timedelta(days=1))
+    )
+    assert after.approved is False
+    assert "CONTRACT_PAST_LAST_TRADE_DATE" in after.reasons
+
+    on_the_day = RiskManager(config).evaluate(all_green_risk_context(contract, today=expiry))
+    assert "CONTRACT_PAST_LAST_TRADE_DATE" not in on_the_day.reasons
+
+
+@pytest.mark.safety
+def test_12_the_last_trading_day_is_still_tradeable(contract) -> None:
+    """Refusing on the final session would strand a position held into it.
+
+    The operator must always be able to flatten. Expiry refuses *after* the
+    last trade date, not on it.
+    """
+    from datetime import date
+
+    assert contract.is_expired(date(2026, 12, 18)) is False
+    assert contract.is_expired(date(2026, 12, 19)) is True
+    assert contract.days_until_expiry(date(2026, 12, 8)) == 10
+
+
+@pytest.mark.safety
+def test_12_an_undeterminable_expiry_counts_as_expired() -> None:
+    """A malformed date is not a reason to assume the contract is alive."""
+    from dataclasses import replace
+    from datetime import date
+
+    from tests.conftest import CONTRACT_MONTH
+
+    base = QualifiedContract(
+        con_id=1,
+        symbol="MSL",
+        local_symbol="MSLZ6",
+        sec_type=SecurityType.FUTURE,
+        exchange="CME",
+        currency="USD",
+        expiration=CONTRACT_MONTH,
+        last_trade_date="20261218",
+        multiplier="25",
+        min_tick=Decimal("0.05"),
+        trading_class="MSL",
+    )
+
+    # Only a bare YYYYMM anywhere: the real last trade date is unknown, and
+    # neither end of the month is a fact.
+    vague = replace(base, last_trade_date="202612", expiration="202612")
+    assert vague.expiry_date() is None
+    assert vague.is_expired(date(2026, 1, 1)) is True
+
+    nonsense = replace(base, last_trade_date="20261345", expiration="not-a-date")
+    assert nonsense.expiry_date() is None
+    assert nonsense.is_expired(date(2020, 1, 1)) is True
