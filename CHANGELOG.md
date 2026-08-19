@@ -94,6 +94,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Which distribution to install is the open supply-chain decision in
   `docs/IBKR_API_NOTES.md`, and the error should not pre-empt it.
 
+### Fixed
+
+- `request_market_data` waited a fixed half second for the first tick of a new
+  subscription and then reported whatever it had. Streaming data has no
+  completion callback, so the first tick has to be waited for rather than
+  requested — and half a second is not long enough for a thin contract, which
+  meant an empty tick was returned as though nobody were quoting. Two
+  observationally identical results, one a fact about the market and one a bug.
+
+  It now polls for the first tick, an error, or a ten-second deadline, whichever
+  comes first, against a monotonic clock. Returning empty after the *full* wait
+  is a real quiet market.
+
+  The defect was invisible until the first minute market data actually worked:
+  every earlier run against the gateway was refused with `354` before the timing
+  could matter, so the code path had never once been exercised. Found by the
+  read-only checkout, which is now the fourth defect it has found that the unit
+  tests could not — they drive fakes that answer instantly.
+
 ## [0.1.0] — 2026-08-07
 
 Initial infrastructure. **This release cannot place an order**, by design and by

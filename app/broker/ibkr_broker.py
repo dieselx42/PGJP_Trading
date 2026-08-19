@@ -558,6 +558,9 @@ _TICK_PRICE_FIELDS: Final[dict[int, str]] = {
 #: one is flagged, and the transmit gate refuses to trade on a flagged tick.
 _DELAYED_TICK_TYPES: Final[frozenset[int]] = frozenset({66, 67, 68})
 
+#: How often to check for the first tick of a new subscription.
+_FIRST_TICK_POLL_SECONDS: Final[float] = 0.25
+
 #: IBKR order status strings mapped onto our vocabulary.
 IB_STATUS_MAP: Final[dict[str, OrderStatus]] = {
     "PendingSubmit": OrderStatus.PENDING_SUBMIT,
@@ -631,6 +634,7 @@ class IBKRBroker(Broker):
         client_id: int,
         connect_timeout_seconds: float = 15.0,
         request_timeout_seconds: float = 20.0,
+        first_tick_timeout_seconds: float = 10.0,
         expected_account_type: AccountType | None = None,
     ) -> None:
         self._host = host
@@ -638,6 +642,7 @@ class IBKRBroker(Broker):
         self._client_id = client_id
         self._connect_timeout = connect_timeout_seconds
         self._request_timeout = request_timeout_seconds
+        self._first_tick_timeout = first_tick_timeout_seconds
         self._expected_account_type = expected_account_type
 
         self._session: _IBSession | None = None
@@ -994,9 +999,13 @@ class IBKRBroker(Broker):
             session.reqMktData(
                 request_id, _to_ib_contract(contract.to_spec()), "", False, False, []
             )
-            # Streaming data has no explicit "end" callback; give the first
-            # ticks a moment to arrive before reporting a snapshot.
-            await asyncio.sleep(0.5)
+            # Streaming data has no "end" callback, so the first tick has to be
+            # waited for rather than requested. This polls instead of sleeping a
+            # fixed interval: a thin contract can take seconds to quote, and the
+            # previous half-second wait reported an empty tick as though the
+            # market were silent. That went unnoticed because every earlier run
+            # was refused with 354 before the timing mattered at all.
+            await self._await_first_tick(session, request_id)
 
         values = session.ticks.get(request_id, {})
         if not values:
@@ -1018,6 +1027,33 @@ class IBKRBroker(Broker):
             last=values.get("last"),
             is_delayed=request_id in session.delayed_requests,
         )
+
+    async def _await_first_tick(self, session: _IBSession, request_id: int) -> None:
+        """Wait for the first tick, an error, or the deadline -- whichever first.
+
+        Streaming market data has no completion callback, so there is nothing to
+        await; the only alternatives are polling and a fixed sleep. A fixed sleep
+        that is too short reports an empty tick as though the market were silent,
+        which is the same observable result as a genuinely quiet market and a
+        completely different problem.
+
+        The deadline is monotonic rather than wall-clock: a clock step must not
+        be able to end the wait early or extend it indefinitely.
+
+        Returning empty after the *full* wait is a real "nobody is quoting" --
+        a fact about the market rather than an artefact of not having waited.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._first_tick_timeout
+        while True:
+            if session.ticks.get(request_id):
+                return
+            if session.request_error(request_id) is not None:
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(_FIRST_TICK_POLL_SECONDS, remaining))
 
     async def cancel_market_data(self, contract: QualifiedContract) -> None:
         session = self._session
