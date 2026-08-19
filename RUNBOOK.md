@@ -818,10 +818,16 @@ exposes no such flag, which is why `SOL_FUTURES_PERMISSION_READY` is a hand-set
 variable. Setting it `true` while permission is pending produces rejected orders,
 not trades.
 
+Confirmed granted on 2026-08-19 via a `whatIf` order preview, which IBKR priced
+rather than refusing: initial margin $1,179.88, maintenance $1,025.98,
+commission $3.41 on a 1-lot MSLQ6. A permission-blocked account returns
+`10187`/`10276`/`460` there instead.
+
 Set **small** limits first:
 
 ```ini
 SOL_FUTURES_PERMISSION_READY=true
+MARKET_DATA_MAX_AGE_SECONDS=30
 MAX_ORDER_SIZE=1
 MAX_POSITION_CONTRACTS=1
 MAX_DAILY_LOSS_USD=100
@@ -832,7 +838,57 @@ ALLOW_ORDER_TRANSMIT=true
 KILL_SWITCH=false
 ```
 
-Restart, confirm `application.state` is `READY` and the transmit gate reports
-`allowed: true`, and watch the first order end to end.
+Restart and confirm `application.state` is `READY`.
+
+#### The first order is sent by hand, not by a strategy
+
+**Do not expect the running bot to trade at this point.** `NoOpStrategy` returns
+no intents, ever, so an armed system with the shipped strategy sits there
+producing nothing — which is indistinguishable from a broken one. Arming a
+strategy is also the wrong first experiment: it fires on a market tick, at a
+moment nobody chose, with nobody watching.
+
+Send exactly one order, deliberately, with `place-order`. **Preview first** —
+without `--confirm` it sends nothing:
+
+```bash
+docker compose exec -T sol-trading-bot python -m app.cli place-order \
+  --target-position 1 --limit-price 75.00
+```
+
+Read the report. `plan.resulting_order` is what would be sent,
+`approvals.risk` and `approvals.gate` are what both approvers say, and
+`would_be_allowed` is the summary. A refusal here is the interlocks working,
+not a fault — fix the named reason rather than routing around it.
+
+The preview prints the exact confirmation to add. The token is the contract's
+broker-reported `local_symbol`, so it can only come from a preview that actually
+resolved a contract at IBKR:
+
+```bash
+docker compose exec -T sol-trading-bot python -m app.cli place-order \
+  --target-position 1 --limit-price 75.00 --confirm MSLQ6
+```
+
+`--target-position` is an **absolute target, not a delta**. Running it twice
+leaves you long 1, not 2. To close, ask for `0`.
+
+The limit price defaults to a limit order for a reason: a first-ever order
+should not be able to fill at a surprising price. Set it below the market for a
+buy and it will rest rather than fill, which lets you watch the submit and
+acknowledge path before anything executes. Then move it to marketable to watch
+the fill.
+
+Watch it end to end — this is the first time `place_order`, `orderStatus`,
+`execDetails` and `commissionReport` have ever run:
+
+```bash
+docker compose exec -T sol-trading-bot python -m app.cli open-orders
+docker compose exec -T sol-trading-bot python -m app.cli positions
+docker compose exec -T sol-trading-bot python -m app.cli status
+```
+
+`cancel-all-orders --confirm` is the way out at any point.
 
 **Live trading remains out of scope and requires a separate, explicit decision.**
+`place-order` refuses live mode outright, before it constructs a broker.

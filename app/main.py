@@ -21,6 +21,7 @@ import contextlib
 import signal
 import sys
 from collections.abc import Sequence
+from decimal import Decimal
 
 from app.broker.base import Broker
 from app.broker.mock_broker import MockBroker
@@ -32,7 +33,14 @@ from app.broker.models import (
 from app.config import Config, ConfigError
 from app.contracts.models import QualifiedContract
 from app.contracts.resolver import ContractResolutionError, ContractResolver
-from app.enums import AccountType, ApplicationState, ConnectionState, OrderSide, TradingMode
+from app.enums import (
+    AccountType,
+    ApplicationState,
+    ConnectionState,
+    OrderSide,
+    OrderType,
+    TradingMode,
+)
 from app.execution.order_manager import OrderManager, SubmissionOutcome
 from app.logging_config import (
     configure_logging,
@@ -452,7 +460,21 @@ class TradingApplication:
     # Intent handling
     # ------------------------------------------------------------------
 
-    async def _handle_intent(self, intent: TradeIntent) -> SubmissionOutcome | None:
+    async def _handle_intent(
+        self,
+        intent: TradeIntent,
+        *,
+        order_type: OrderType = OrderType.MARKET,
+        limit_price: Decimal | None = None,
+    ) -> SubmissionOutcome | None:
+        """Run one intent through validation, risk, the gate and the order manager.
+
+        ``order_type`` and ``limit_price`` exist for the operator command in
+        ``app/execution/operator_order.py``, which needs a limit order so a
+        first-ever order cannot fill at a surprising price. The defaults are the
+        strategy path's previous behaviour exactly, so nothing about how a
+        strategy's intent is handled changed when they were added.
+        """
         validator = self.validator
         order_manager = self.order_manager
         if validator is None or order_manager is None:
@@ -502,6 +524,8 @@ class TradingApplication:
                 contract=contract,
                 risk_context=risk_context,
                 gate_context=gate_context,
+                order_type=order_type,
+                limit_price=limit_price,
             )
 
     def _build_risk_context(
