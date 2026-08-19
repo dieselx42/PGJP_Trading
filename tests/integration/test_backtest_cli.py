@@ -239,6 +239,15 @@ class TestDisclosure:
         assert payload["data"]["is_proxy_data"] is True
         assert "NOT CME FUTURES" in payload["limitations"][0]
 
+    def test_a_volumeless_series_warns_that_fills_may_be_manufactured(
+        self, backtest_env: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The fixture's bars carry no volume, so the check cannot apply."""
+        _, payload = _run(capsys, "backtest")
+
+        assert payload["data"]["volume_reported"] is False
+        assert any("REPORTS NO VOLUME" in note for note in payload["limitations"])
+
     def test_the_fill_model_used_is_reported(
         self, backtest_env: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

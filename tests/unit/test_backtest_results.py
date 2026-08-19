@@ -67,6 +67,8 @@ def _run(**overrides: object) -> BacktestRun:
         "is_proxy_data": True,
         "bars_seen": 5,
         "bars_tradeable": 5,
+        "bars_without_trades": 0,
+        "volume_reported": True,
         "first_bar": T.format(0),
         "last_bar": T.format(4),
         "fills": (),
@@ -296,6 +298,67 @@ class TestLimitations:
         assert any("ended holding 2 contract(s)" in note for note in notes)
         assert any("unrealised" in note for note in notes)
 
+    @pytest.mark.safety
+    def test_the_wrong_instrument_outranks_the_wrong_fills(self) -> None:
+        """Ordered by how badly a reader would be misled, not by check order.
+
+        A spot result mistaken for a futures one is wrong about *what was
+        traded*. That has to lead, even when the fill model also has something
+        loud to say.
+        """
+        notes = build_report(
+            _run(is_proxy_data=True, source="binance-us", volume_reported=False)
+        ).describe()["limitations"]
+
+        assert isinstance(notes, list)
+        assert "NOT CME FUTURES" in notes[0]
+        assert "REPORTS NO VOLUME" in notes[1]
+
+    def test_a_source_without_volume_says_fills_may_be_manufactured(self) -> None:
+        notes = build_report(_run(is_proxy_data=False, volume_reported=False)).describe()[
+            "limitations"
+        ]
+
+        assert isinstance(notes, list)
+        assert "REPORTS NO VOLUME" in notes[0]
+        assert "prices nobody could have got" in notes[0]
+
+    def test_a_few_empty_bars_are_noted_without_alarm(self) -> None:
+        notes = build_report(
+            _run(is_proxy_data=False, bars_seen=100, bars_without_trades=5)
+        ).describe()["limitations"]
+
+        assert isinstance(notes, list)
+        joined = " ".join(notes)
+        assert "5 of 100 bars (5.0%) had zero volume" in joined
+        assert "too thin" not in joined
+        assert "zero volume" not in notes[0], "a minor caveat does not lead"
+
+    @pytest.mark.safety
+    def test_a_mostly_empty_series_is_called_too_thin_and_leads(self) -> None:
+        """Binance.US SOLUSD at 1-minute is largely placeholder bars.
+
+        A result computed over mostly-empty history is mostly fiction, and that
+        has to be the first thing a reader sees.
+        """
+        notes = build_report(
+            _run(is_proxy_data=False, bars_seen=100, bars_without_trades=60)
+        ).describe()["limitations"]
+
+        assert isinstance(notes, list)
+        assert "60 of 100 bars (60.0%)" in notes[0]
+        assert "too thin" in notes[0]
+        assert "longer bar interval" in notes[0]
+
+    def test_a_fully_traded_series_carries_no_volume_caveat(self) -> None:
+        notes = build_report(_run(bars_without_trades=0, volume_reported=True)).describe()[
+            "limitations"
+        ]
+
+        assert isinstance(notes, list)
+        assert not any("zero volume" in note for note in notes)
+        assert not any("REPORTS NO VOLUME" in note for note in notes)
+
     def test_a_flat_ending_is_not_flagged(self) -> None:
         notes = build_report(_run(final_position=0)).describe()["limitations"]
 
@@ -313,6 +376,8 @@ class TestDescribe:
             "interval": "1m",
             "bars": 5,
             "bars_tradeable": 5,
+            "bars_without_trades": 0,
+            "volume_reported": True,
             "first_bar": T.format(0),
             "last_bar": T.format(4),
             "is_proxy_data": True,

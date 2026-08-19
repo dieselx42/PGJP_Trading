@@ -92,6 +92,22 @@ class Bar:
         return self.source.lower() not in FUTURES_SOURCES
 
     @property
+    def had_trades(self) -> bool:
+        """Whether anything actually changed hands during this bar.
+
+        Thin venues emit a placeholder bar for every minute with no activity:
+        open, high, low and close all equal to the last print, and volume zero.
+        Binance.US SOLUSD does this constantly. Those are not prices anyone
+        could have traded at, and filling against them manufactures executions
+        that could never have happened.
+
+        Zero volume can also mean "this source does not report volume at all",
+        which is a different statement. The two are distinguished at the series
+        level, not here -- see :func:`reports_volume`.
+        """
+        return self.volume > 0
+
+    @property
     def closed_at(self) -> datetime:
         return self.opened_at + timedelta(seconds=INTERVAL_SECONDS[self.interval])
 
@@ -155,6 +171,20 @@ def find_gaps(bars: Sequence[Bar]) -> tuple[BarGap, ...]:
     return tuple(gaps)
 
 
+def reports_volume(bars: Sequence[Bar]) -> bool:
+    """Whether this series carries volume at all.
+
+    A series with no volume anywhere means the source does not report it -- a
+    CSV without a volume column, for instance. That is not the same as a series
+    whose bars are individually empty, and the difference decides whether
+    zero volume can be used to judge tradeability. Treating an unreported
+    field as "nothing ever traded" would refuse every bar; treating a genuinely
+    empty bar as tradeable would invent fills. Both are wrong in opposite
+    directions, so the question is asked once, of the whole series.
+    """
+    return any(bar.volume > 0 for bar in bars)
+
+
 def to_decimal(value: object, *, field: str) -> Decimal:
     """Parse a price, refusing rather than guessing."""
     try:
@@ -170,5 +200,6 @@ __all__ = [
     "BarError",
     "BarGap",
     "find_gaps",
+    "reports_volume",
     "to_decimal",
 ]

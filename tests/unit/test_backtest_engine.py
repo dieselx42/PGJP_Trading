@@ -113,6 +113,24 @@ def _flat(count: int, price: str = "80", *, start: datetime = T0) -> list[Bar]:
     return _bars([(price, price)] * count, start=start)
 
 
+def _volumed(prices: Sequence[tuple[str, str]], *, start: datetime = T0) -> list[Bar]:
+    """One bar per (price, volume) pair. A volume of "0" means nothing traded."""
+    return [
+        Bar(
+            source="binance-us",
+            symbol="SOLUSD",
+            interval="1m",
+            opened_at=start + timedelta(minutes=index),
+            open=Decimal(price),
+            high=Decimal(price),
+            low=Decimal(price),
+            close=Decimal(price),
+            volume=Decimal(volume),
+        )
+        for index, (price, volume) in enumerate(prices)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Strategies. Deliberately trivial: the engine is what is under test.
 # ---------------------------------------------------------------------------
@@ -500,6 +518,90 @@ class TestSessionFilter:
         run = _run(_Target(1), _flat(3))
 
         assert run.session_filtered is False
+
+
+class TestBarsWhereNothingTraded:
+    """A zero-volume bar is a placeholder, not a price.
+
+    Binance.US SOLUSD emits one for every minute with no activity: OHLC all
+    equal to the last print, volume zero. Filling against those manufactures
+    executions at prices nobody could have got, and the equity curve that
+    results looks entirely normal.
+    """
+
+    @pytest.mark.safety
+    def test_an_empty_bar_is_not_filled_against(self) -> None:
+        bars = _volumed([("80", "1"), ("80", "0"), ("80", "1")])
+        run = _run(_Target(1), bars)
+
+        # Bar 0 places an order; bar 1 has no trades, so it cancels rather than
+        # filling; bar 2 has volume but the order is already gone.
+        assert run.fills == ()
+        assert run.final_position == 0
+        assert run.bars_without_trades == 1
+
+    def test_a_bar_with_volume_still_fills(self) -> None:
+        """The control: without this the test above passes on a broken engine."""
+        run = _run(_Target(1), _volumed([("80", "1"), ("80", "1")]))
+
+        assert len(run.fills) == 1
+        assert run.final_position == 1
+
+    def test_the_strategy_is_not_consulted_on_an_empty_bar(self) -> None:
+        run = _run(_Target(1), _volumed([("80", "1"), ("80", "0"), ("80", "0")]))
+
+        assert run.bars_tradeable == 1, "only the bar that had trades"
+        assert run.bars_without_trades == 2
+        assert len(run.refusals) <= 1
+
+    @pytest.mark.safety
+    def test_a_wholly_empty_series_reads_as_no_volume_data(self) -> None:
+        """A stated ambiguity, not an oversight.
+
+        "Every bar has zero volume" and "this source does not report volume"
+        are the same series. The inference cannot separate them, so it takes
+        the permissive branch and the report says so in its loudest terms --
+        `volume_reported: False` carries a limitation note about manufactured
+        fills. One bar with any volume anywhere resolves it.
+        """
+        run = _run(_Target(1), _volumed([("80", "0"), ("80", "0"), ("80", "0")]))
+
+        assert run.volume_reported is False
+        assert run.bars_tradeable == 3
+
+        resolved = _run(_Target(1), _volumed([("80", "1"), ("80", "0"), ("80", "0")]))
+        assert resolved.volume_reported is True
+        assert resolved.bars_tradeable == 1
+
+    def test_the_count_is_reported(self) -> None:
+        run = _run(_Target(1), _volumed([("80", "1"), ("80", "0"), ("80", "0"), ("80", "1")]))
+
+        assert run.bars_seen == 4
+        assert run.bars_without_trades == 2
+        assert run.volume_reported is True
+
+    @pytest.mark.safety
+    def test_a_source_with_no_volume_at_all_is_not_refused_wholesale(self) -> None:
+        """A CSV without a volume column must not have every bar rejected.
+
+        Zero volume means "nothing traded" only where volume is reported.
+        Where it is not, the same rule would refuse the entire history for a
+        field the source never claimed to provide.
+        """
+        run = _run(_Target(1), _flat(3))  # every bar defaults to volume 0
+
+        assert run.volume_reported is False
+        assert run.bars_without_trades == 0
+        assert run.bars_tradeable == 3
+        assert run.fills, "a volume-less source is replayed, not refused"
+
+    def test_the_equity_curve_still_marks_through_an_empty_bar(self) -> None:
+        """A position is still held, and still at risk, when nothing trades."""
+        bars = _volumed([("80", "1"), ("80", "1"), ("90", "0"), ("90", "1")])
+        run = _run(_Target(1), bars)
+
+        assert len(run.equity_curve) == 4
+        assert run.final_position == 1
 
 
 class TestEndOfReplay:

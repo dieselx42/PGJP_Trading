@@ -12,9 +12,30 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.backtest.models import Bar, BarGap, find_gaps, to_decimal
+from app.backtest.models import Bar, BarGap, find_gaps, reports_volume, to_decimal
 from app.state.database import Database
 from app.utilities.timeutils import from_iso, to_iso
+
+#: Above this share of empty bars, a series is too thin to draw conclusions
+#: from at this interval. Not a hard refusal -- the data is still stored and
+#: still replayable -- but the number is stated rather than left to be noticed.
+_THIN_SERIES_SHARE = 0.25
+
+
+def _liquidity_note(reports: bool, zero_share: float) -> str:
+    if not reports:
+        return (
+            "this source reports no volume, so bars where nothing traded cannot be "
+            "identified. A replay will treat every bar as tradeable."
+        )
+    if zero_share >= _THIN_SERIES_SHARE:
+        return (
+            f"{zero_share:.1%} of bars had no trades at all. This venue is thin at this "
+            "interval; prefer a deeper book or a longer bar interval before replaying it."
+        )
+    if zero_share > 0:
+        return f"{zero_share:.1%} of bars had no trades; a replay will not fill against them."
+    return "every bar had trades."
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,13 +49,28 @@ class BarSeriesInfo:
     first_opened_at: datetime | None
     last_opened_at: datetime | None
     gaps: tuple[BarGap, ...] = ()
+    zero_volume_bars: int = 0
+    """Bars in which nothing traded.
+
+    Reported here so a source can be judged *before* a year of it is imported
+    and replayed. A thin venue emits one of these for every quiet interval, and
+    a series that is mostly placeholder bars produces a backtest that is mostly
+    fiction.
+    """
+
+    reports_volume: bool = False
 
     def describe(self) -> dict[str, object]:
+        share = self.zero_volume_bars / self.count if self.count else 0.0
         return {
             "source": self.source,
             "symbol": self.symbol,
             "interval": self.interval,
             "count": self.count,
+            "reports_volume": self.reports_volume,
+            "zero_volume_bars": self.zero_volume_bars,
+            "zero_volume_share": round(share, 4),
+            "liquidity_note": _liquidity_note(self.reports_volume, share),
             "first_opened_at": None
             if not self.first_opened_at
             else self.first_opened_at.isoformat(),
@@ -112,6 +148,8 @@ class BarRepository:
             first_opened_at=bars[0].opened_at if bars else None,
             last_opened_at=bars[-1].opened_at if bars else None,
             gaps=find_gaps(bars),
+            zero_volume_bars=sum(1 for bar in bars if not bar.had_trades),
+            reports_volume=reports_volume(bars),
         )
 
     def series(self) -> tuple[tuple[str, str, str], ...]:

@@ -58,13 +58,18 @@ class _Response:
 def _opener(pages: list[Any]) -> Any:
     """Serves each page in turn, then empty pages forever."""
     calls: list[str] = []
+    headers: list[dict[str, str]] = []
 
-    def opener(url: str, timeout: float = 0) -> _Response:
-        calls.append(url)
+    def opener(request: Any, timeout: float = 0) -> _Response:
+        # Requests carry a User-Agent header now, so what arrives here is a
+        # `Request`, not a bare URL string.
+        calls.append(getattr(request, "full_url", request))
+        headers.append(dict(getattr(request, "headers", {})))
         page = pages.pop(0) if pages else []
         return _Response(json.dumps(page).encode())
 
     opener.calls = calls  # type: ignore[attr-defined]
+    opener.headers = headers  # type: ignore[attr-defined]
     return opener
 
 
@@ -282,3 +287,101 @@ class TestBinanceUnitedStates:
     def test_the_global_source_keeps_its_name(self) -> None:
         assert BinanceBarSource().name == "binance"
         assert BinanceBarSource().base_url == "https://api.binance.com"
+
+
+class TestSeriesLiquidityIsVisibleBeforeReplaying:
+    """`bars-info` has to answer "is this source any good" before a year of it.
+
+    Binance.US SOLUSD emits a placeholder bar for every quiet minute. Noticing
+    that after importing 500,000 rows and running a backtest is too late.
+    """
+
+    def _store(self, tmp_path: Any, bars: list[Bar]) -> Any:
+        from app.backtest.store import BarRepository
+        from app.state.database import Database
+
+        database = Database(tmp_path / "bars.db")
+        database.connect()
+        database.migrate()
+        repo = BarRepository(database)
+        repo.insert_many(bars)
+        return repo
+
+    def _bar(self, minute: int, volume: str) -> Bar:
+        return Bar(
+            source="binance-us",
+            symbol="SOLUSD",
+            interval="1m",
+            opened_at=T0 + timedelta(minutes=minute),
+            open=Decimal("177"),
+            high=Decimal("177"),
+            low=Decimal("177"),
+            close=Decimal("177"),
+            volume=Decimal(volume),
+        )
+
+    def test_empty_bars_are_counted_and_shared(self, tmp_path: Any) -> None:
+        repo = self._store(
+            tmp_path, [self._bar(0, "0"), self._bar(1, "0"), self._bar(2, "5"), self._bar(3, "5")]
+        )
+
+        described = repo.info(source="binance-us", symbol="SOLUSD", interval="1m").describe()
+
+        assert described["count"] == 4
+        assert described["zero_volume_bars"] == 2
+        assert described["zero_volume_share"] == 0.5
+        assert described["reports_volume"] is True
+
+    @pytest.mark.safety
+    def test_a_thin_series_is_named_as_such(self, tmp_path: Any) -> None:
+        repo = self._store(tmp_path, [self._bar(0, "0"), self._bar(1, "0"), self._bar(2, "5")])
+
+        note = repo.info(source="binance-us", symbol="SOLUSD", interval="1m").describe()[
+            "liquidity_note"
+        ]
+
+        assert "thin" in str(note)
+        assert "longer bar interval" in str(note)
+
+    def test_a_healthy_series_says_so(self, tmp_path: Any) -> None:
+        repo = self._store(tmp_path, [self._bar(0, "5"), self._bar(1, "5")])
+
+        note = repo.info(source="binance-us", symbol="SOLUSD", interval="1m").describe()[
+            "liquidity_note"
+        ]
+
+        assert note == "every bar had trades."
+
+    def test_a_volumeless_source_is_distinguished_from_a_dead_one(self, tmp_path: Any) -> None:
+        repo = self._store(tmp_path, [self._bar(0, "0"), self._bar(1, "0")])
+
+        described = repo.info(source="binance-us", symbol="SOLUSD", interval="1m").describe()
+
+        assert described["reports_volume"] is False
+        assert "reports no volume" in str(described["liquidity_note"])
+
+
+class TestRequestsIdentifyThemselves:
+    """Coinbase's edge answers `Python-urllib/3.12` with HTTP 403.
+
+    The header names this client honestly rather than impersonating a browser.
+    Being identifiable is the point; being mistaken for something else is not.
+    """
+
+    def test_coinbase_requests_carry_a_user_agent(self) -> None:
+        opener = _opener([])
+        source = CoinbaseBarSource(opener=opener)
+
+        list(source.fetch(symbol="SOL-USD", interval="1m", start=T0, end=T0 + timedelta(minutes=1)))
+
+        agent = opener.headers[0]["User-agent"]
+        assert "sol-futures-trading-bot" in agent
+        assert "urllib" not in agent.lower()
+
+    def test_binance_requests_carry_one_too(self) -> None:
+        opener = _opener([])
+        source = BinanceBarSource(opener=opener)
+
+        list(source.fetch(symbol="SOLUSDT", interval="1m", start=T0, end=T0 + timedelta(minutes=1)))
+
+        assert "sol-futures-trading-bot" in opener.headers[0]["User-agent"]

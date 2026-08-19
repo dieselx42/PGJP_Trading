@@ -56,6 +56,22 @@ _BINANCE_PAGE_LIMIT: Final = 1000
 #: window outright rather than truncating it.
 _COINBASE_PAGE_LIMIT: Final = 300
 
+#: Sent on every request. `urllib`'s default identifies itself as
+#: `Python-urllib/3.12`, which Coinbase's edge answers with HTTP 403 before the
+#: request reaches the API. This names the client honestly rather than
+#: impersonating a browser -- the point is to be identifiable, not to be
+#: mistaken for something else.
+_USER_AGENT: Final = "sol-futures-trading-bot/0.1 (historical bar import)"
+
+
+def _get(opener: Any, url: str, *, timeout: float) -> bytes:
+    """One GET, with a request object so headers can be attached."""
+    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310
+    with opener(request, timeout=timeout) as response:
+        body = response.read()
+    return bytes(body)
+
+
 #: Give up rather than hammer a public endpoint that is refusing. A year of
 #: 1-minute bars is ~1,752 Coinbase pages, so this has to clear that.
 _MAX_PAGES: Final = 4000
@@ -239,8 +255,7 @@ class BinanceBarSource:
         )
         url = f"{self.base_url}/api/v3/klines?{params}"
         try:
-            with self._opener(url, timeout=self._timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            payload = json.loads(_get(self._opener, url, timeout=self._timeout).decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise HistoricalSourceError(f"could not reach {self.base_url}: {exc}") from exc
         except json.JSONDecodeError as exc:
@@ -341,8 +356,7 @@ class CoinbaseBarSource:
         )
         url = f"{self.base_url}/products/{symbol}/candles?{params}"
         try:
-            with self._opener(url, timeout=self._timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            payload = json.loads(_get(self._opener, url, timeout=self._timeout).decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise HistoricalSourceError(f"could not reach {self.base_url}: {exc}") from exc
         except json.JSONDecodeError as exc:

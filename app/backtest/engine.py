@@ -35,6 +35,19 @@ all -- an interlock that cannot fail in a backtest is not being tested by it.
 A refusal therefore names every party that objected (``risk+gate``) and lists
 what each of them found.
 
+Bars where nothing traded
+-------------------------
+A thin venue emits a placeholder bar for every interval with no activity: OHLC
+all equal to the last print, volume zero. Binance.US SOLUSD does this for long
+stretches. Those are not prices anyone could have traded at, so a bar with zero
+volume is **not tradeable** here -- treated exactly like a session break, with
+pending orders cancelled rather than filled against a price that never existed.
+
+The check applies only when the source reports volume at all. A CSV with no
+volume column would otherwise have every bar refused, which is the same mistake
+in the opposite direction. The question is asked once, of the whole series, and
+the answer is reported in the result.
+
 What is NOT exercised
 ---------------------
 `OrderManager`'s persistence and idempotency layer. Idempotency exists to
@@ -59,7 +72,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.backtest.broker import BacktestBroker, FillModel, SimulatedFill
-from app.backtest.models import Bar
+from app.backtest.models import Bar, reports_volume
 from app.config import Config
 from app.contracts.models import QualifiedContract
 from app.enums import AccountType, ApplicationState, ConnectionState, OrderType
@@ -302,6 +315,14 @@ class BacktestRun:
     is_proxy_data: bool
     bars_seen: int
     bars_tradeable: int
+    bars_without_trades: int
+    """Bars whose volume was zero, on a source that does report volume.
+
+    A thin venue emits one of these for every interval in which nothing
+    changed hands. They are not tradeable prices.
+    """
+
+    volume_reported: bool
     first_bar: str | None
     last_bar: str | None
     fills: tuple[SimulatedFill, ...]
@@ -362,10 +383,19 @@ class BacktestEngine:
         refusals: list[Refusal] = []
         curve: list[tuple[str, Decimal]] = []
         tradeable_bars = 0
+        empty_bars = 0
         orders_this_hour: list[datetime] = []
 
+        # Asked once, of the whole series. A source that never reports volume
+        # cannot have its bars judged by it; one that does can, and a zero
+        # there means nothing traded that minute.
+        volume_reported = reports_volume(bars)
+
         for bar in bars:
-            tradeable = self.session(bar.opened_at)
+            has_liquidity = bar.had_trades or not volume_reported
+            if not has_liquidity:
+                empty_bars += 1
+            tradeable = self.session(bar.opened_at) and has_liquidity
 
             # Settle first: an order placed while the PREVIOUS bar was being
             # processed fills at THIS bar's open. Never at the close of the bar
@@ -398,6 +428,8 @@ class BacktestEngine:
             is_proxy_data=bool(bars) and bars[0].is_proxy,
             bars_seen=len(bars),
             bars_tradeable=tradeable_bars,
+            bars_without_trades=empty_bars,
+            volume_reported=volume_reported,
             first_bar=bars[0].opened_at.isoformat() if bars else None,
             last_bar=bars[-1].opened_at.isoformat() if bars else None,
             fills=tuple(self.broker.executed),

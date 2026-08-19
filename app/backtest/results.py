@@ -24,6 +24,10 @@ from app.backtest.engine import BacktestRun
 #: is reported alongside the Sharpe it produced so nobody has to guess.
 _MINUTES_PER_YEAR: Final = 365 * 24 * 60
 
+#: Above this share of bars with no trades, the venue is too thin at this
+#: interval for a result to mean much, and the note leads rather than trails.
+_THIN_SERIES_SHARE: Final = 0.25
+
 _BARS_PER_YEAR: Final[dict[str, int]] = {
     "1m": _MINUTES_PER_YEAR,
     "5m": _MINUTES_PER_YEAR // 5,
@@ -67,6 +71,8 @@ class BacktestReport:
                 "interval": run.interval,
                 "bars": run.bars_seen,
                 "bars_tradeable": run.bars_tradeable,
+                "bars_without_trades": run.bars_without_trades,
+                "volume_reported": run.volume_reported,
                 "first_bar": run.first_bar,
                 "last_bar": run.last_bar,
                 "is_proxy_data": run.is_proxy_data,
@@ -112,21 +118,54 @@ class BacktestReport:
 
 
 def _limitations(run: BacktestRun) -> list[str]:
-    """Stated in the output, because a result without them gets misquoted."""
+    """Stated in the output, because a result without them gets misquoted.
+
+    Ordered by how badly a reader would be misled without them, most severe
+    first, rather than by the order the checks happen to run in. Wrong
+    *instrument* outranks wrong *fills*: a spot result mistaken for a futures
+    one is wrong about what was traded at all.
+    """
+    leading: list[str] = []
+    trailing: list[str] = []
+
+    if run.is_proxy_data:
+        leading.append(
+            f"THIS RAN ON {run.source.upper()} SPOT DATA, NOT CME FUTURES. No basis, no "
+            "roll, no CME session breaks, and volume that does not reflect the futures "
+            "book. Useful for developing a strategy; not a fill estimate for MSL."
+        )
+
+    share = run.bars_without_trades / run.bars_seen if run.bars_seen else 0.0
+    if not run.volume_reported:
+        leading.append(
+            "THIS SOURCE REPORTS NO VOLUME, so bars where nothing traded could not be "
+            "identified and were all treated as tradeable. On a thin venue that "
+            "manufactures fills at prices nobody could have got."
+        )
+    elif run.bars_without_trades:
+        note = (
+            f"{run.bars_without_trades} of {run.bars_seen} bars ({share:.1%}) had zero "
+            "volume: nothing traded, so they were not tradeable here and pending orders "
+            "were cancelled against them rather than filled."
+        )
+        if share >= _THIN_SERIES_SHARE:
+            leading.append(
+                note + " That is a large share of the history. This venue is too thin at "
+                "this interval for the result to mean much; prefer a deeper book or a "
+                "longer bar interval."
+            )
+        else:
+            trailing.append(note)
+
     notes = [
+        *leading,
         "Bars are not ticks: intrabar highs and lows are never traded against, so some "
         "orders that would have filled in reality did not fill here.",
         "A bar has no spread: bid and ask are synthesised around the close. Real spreads "
         "widen exactly when a strategy most wants to trade.",
         "Fills assume the full size was available at the next open. Depth is not modelled.",
+        *trailing,
     ]
-    if run.is_proxy_data:
-        notes.insert(
-            0,
-            f"THIS RAN ON {run.source.upper()} SPOT DATA, NOT CME FUTURES. No basis, no "
-            "roll, no CME session breaks, and volume that does not reflect the futures "
-            "book. Useful for developing a strategy; not a fill estimate for MSL.",
-        )
     if not run.session_filtered:
         notes.append(
             "No session filter was applied, so bars outside CME trading hours were traded. "
