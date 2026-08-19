@@ -73,10 +73,22 @@ class TradeIntent:
                 f"FLAT intent requires requested_position == 0, got {self.requested_position}"
             )
 
-    @property
-    def is_actionable(self) -> bool:
-        """FLAT-to-flat intents carry no work."""
-        return self.direction is not Direction.FLAT or self.requested_position != 0
+    def requires_order_from(self, current_position: int) -> bool:
+        """Whether reaching this target needs an order, given where we are.
+
+        Replaces an ``is_actionable`` property that answered this from the
+        intent alone, and could not: it treated every ``FLAT``/``0`` intent as
+        carrying no work, on the reasoning that "FLAT-to-flat intents carry no
+        work". True only if you are already flat -- and an intent does not know
+        that. The target is the *destination*; the work depends on the origin.
+
+        The consequence was that **closing a position was inexpressible**. "Be
+        flat" is how every exit is written, and the validator rejected all of
+        them as meaningless while risk and the gate had already computed the
+        correct SELL. Found 2026-08-19 trying to close the first position this
+        system ever held.
+        """
+        return self.requested_position != current_position
 
     def idempotency_key(self, *, con_id: int) -> str:
         """Deterministic key for the order this intent would produce.

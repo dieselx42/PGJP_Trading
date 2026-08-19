@@ -669,7 +669,15 @@ def _fill() -> BrokerFill:
     )
 
 
-def test_trade_intent_flat_is_not_actionable() -> None:
+def test_a_flat_intent_needs_an_order_when_we_are_not_flat() -> None:
+    """Closing a position is the whole point of a FLAT intent.
+
+    This test previously asserted `intent.is_actionable is False` for exactly
+    this intent, encoding the bug: a FLAT/0 target was treated as carrying no
+    work regardless of the position held. Closing a position was therefore
+    inexpressible -- the validator rejected every exit while risk and the gate
+    had already computed the correct SELL. Found against a real open position.
+    """
     intent = TradeIntent(
         strategy_name="noop",
         symbol="MSL",
@@ -677,4 +685,18 @@ def test_trade_intent_flat_is_not_actionable() -> None:
         requested_position=0,
         created_at=utc_now(),
     )
-    assert intent.is_actionable is False
+    assert intent.requires_order_from(1) is True
+    assert intent.requires_order_from(-2) is True
+    assert intent.requires_order_from(0) is False
+
+
+def test_a_target_we_already_hold_needs_no_order() -> None:
+    intent = TradeIntent(
+        strategy_name="noop",
+        symbol="MSL",
+        direction=Direction.LONG,
+        requested_position=2,
+        created_at=utc_now(),
+    )
+    assert intent.requires_order_from(2) is False
+    assert intent.requires_order_from(1) is True
