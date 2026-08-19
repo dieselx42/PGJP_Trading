@@ -28,6 +28,7 @@ from app.broker.mock_broker import MockBroker
 from app.broker.models import (
     AccountSummary,
     BrokerError,
+    BrokerFill,
     BrokerPermissionError,
 )
 from app.config import Config, ConfigError
@@ -42,6 +43,7 @@ from app.enums import (
     TradingMode,
 )
 from app.execution.order_manager import OrderManager, SubmissionOutcome
+from app.execution.order_models import Fill
 from app.logging_config import (
     configure_logging,
     correlation_scope,
@@ -136,6 +138,8 @@ class TradingApplication:
 
         self._connect_attempt = 0
         self._last_error: str | None = None
+        #: Monotonic deadline for the next periodic reconcile. See `_main_loop`.
+        self._next_reconcile_at: float | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -281,8 +285,48 @@ class TradingApplication:
                     continue
                 await self._after_connect()
 
+            await self._maybe_reconcile()
             await self._tick()
             await self._sleep(interval)
+
+    async def _maybe_reconcile(self) -> None:
+        """Re-check our book against the broker's on a timer.
+
+        Reconciliation used to run ONLY inside `_after_connect`, so it happened
+        once per connection and never again. Everything the check exists to
+        catch -- a fill we missed, a position that changed, an order appearing
+        from another client -- could therefore develop mid-session and stay
+        invisible until the next reconnect, which with `restart: unless-stopped`
+        and a healthy gateway could be days.
+
+        A discrepancy found here drops the application to SAFE exactly as one
+        found at connect does. Set ``RECONCILE_INTERVAL_SECONDS=0`` to disable,
+        which is a deliberate choice to stop looking rather than a default.
+        """
+        interval = self.config.reconcile_interval_seconds
+        if interval <= 0:
+            return
+        now = asyncio.get_running_loop().time()
+        if self._next_reconcile_at is None:
+            self._next_reconcile_at = now + interval
+            return
+        if now < self._next_reconcile_at:
+            return
+        self._next_reconcile_at = now + interval
+
+        await self._reconcile()
+        if not self.reconciliation.succeeded:
+            self._set_state(ApplicationState.SAFE)
+            return
+        # Always recompute, never `if state is SAFE`: `_reconcile` leaves the
+        # state at RECONCILING, so a conditional on SAFE never fires and the
+        # application sits in RECONCILING forever. Caught by the recovery test,
+        # which is the only reason this is not still wrong.
+        #
+        # Recovery is as automatic as the drop. A discrepancy that resolves
+        # itself -- a fill finally visible, a stray order cancelled -- should not
+        # need a restart to be believed, or nobody will trust the drop either.
+        self._set_state(self._compute_ready_state())
 
     async def _sleep(self, seconds: float) -> None:
         """Sleep, but wake immediately on shutdown."""
@@ -392,6 +436,15 @@ class TradingApplication:
             self._record_event("reconciliation.failed", str(exc), level="ERROR")
             return
 
+        # Ingest fills BEFORE comparing. A fill is the explanation for a
+        # position we did not previously know about, and reconciliation was
+        # counting fills (`fills_seen`) without ever drawing a conclusion from
+        # them -- so a filled order produced a position the book could not
+        # account for, reconciliation failed, and because positions are only
+        # adopted on success it could never recover. Deadlock, from a fill we
+        # had watched arrive.
+        applied = self._ingest_fills(broker_fills)
+
         self.reconciliation = self.reconciler.reconcile(
             book=self.position_book,
             broker_positions=broker_positions,
@@ -400,6 +453,15 @@ class TradingApplication:
             broker_fills=broker_fills,
             account_available=account_available,
         )
+        if applied:
+            _LOG.info(
+                "applied previously unseen fills to the position book before comparing",
+                extra={
+                    "event": "reconciliation.fills_applied",
+                    "count": len(applied),
+                    "execution_ids": [f.execution_id for f in applied],
+                },
+            )
 
         if self.reconciliation.succeeded:
             self.position_book.replace_all(self.reconciliation.broker_positions)
@@ -628,6 +690,56 @@ class TradingApplication:
             strategy_enabled=self.strategy.enabled if self.strategy else False,
             risk_approved=risk_approved,
         )
+
+    def _ingest_fills(self, broker_fills: Sequence[BrokerFill]) -> list[BrokerFill]:
+        """Record fills we have not seen, and apply only those to the book.
+
+        Idempotency comes from the broker's own execution ids:
+        ``FillRepository.record`` returns ``False`` for one already stored, and
+        only a fill that was genuinely new is applied. So re-reading the same
+        24-hour execution window on every reconnect cannot double-count, and a
+        restart re-reads fills that are already reflected in the book without
+        moving it.
+
+        Applying happens **before** the comparison, so an explained difference
+        is not reported as a discrepancy. An unexplained one still is, and still
+        halts -- which is the distinction that matters: a position that arrived
+        through a fill we watched is not the same as a position that appeared
+        from nowhere.
+        """
+        applied: list[BrokerFill] = []
+        for broker_fill in broker_fills:
+            order = self.repositories.orders.get_by_broker_order_id(broker_fill.broker_order_id)
+            fill = Fill(
+                execution_id=broker_fill.execution_id,
+                internal_order_id=order.internal_order_id if order else "",
+                correlation_id=order.correlation_id if order else "",
+                run_id=self.run_id,
+                con_id=broker_fill.con_id,
+                symbol=broker_fill.symbol,
+                side=broker_fill.side,
+                quantity=broker_fill.quantity,
+                price=broker_fill.price,
+                executed_at=broker_fill.executed_at,
+                commission=broker_fill.commission,
+                commission_currency=broker_fill.commission_currency,
+                broker_order_id=broker_fill.broker_order_id,
+            )
+            if not self.repositories.fills.record(fill):
+                continue  # already known; the book already reflects it
+            self.position_book.apply_fill(
+                con_id=broker_fill.con_id,
+                symbol=broker_fill.symbol,
+                local_symbol=self.contract.local_symbol
+                if self.contract is not None and self.contract.con_id == broker_fill.con_id
+                else broker_fill.symbol,
+                side=broker_fill.side,
+                quantity=broker_fill.quantity,
+                price=broker_fill.price,
+                at=broker_fill.executed_at,
+            )
+            applied.append(broker_fill)
+        return applied
 
     def _broker_permission_ready(self) -> bool:
         """Broker-reported permission, with three distinct meanings.

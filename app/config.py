@@ -330,6 +330,13 @@ class Config:
     market_data_max_age_seconds: float = 0.0
     market_data_poll_interval_seconds: float = 1.0
 
+    #: How often to re-check our book against the broker's while connected.
+    #: Reconciliation used to run ONLY on connect, so a fill, a position
+    #: change or an order appearing mid-session stayed invisible until the
+    #: next reconnect -- which, with a stable gateway, could be days. A
+    #: safety check that runs once at startup is a statement about startup.
+    reconcile_interval_seconds: float = 300.0
+
     # -- strategy ---------------------------------------------------------
     strategy_name: str = "noop"
     strategy_enabled: bool = True
@@ -460,6 +467,9 @@ class Config:
             market_data_max_age_seconds=parse_float(source, "MARKET_DATA_MAX_AGE_SECONDS", 0.0),
             market_data_poll_interval_seconds=parse_float(
                 source, "MARKET_DATA_POLL_INTERVAL_SECONDS", 1.0, minimum=0.05
+            ),
+            reconcile_interval_seconds=parse_float(
+                source, "RECONCILE_INTERVAL_SECONDS", 300.0, minimum=0.0
             ),
             strategy_name=parse_str(source, "STRATEGY_NAME", "noop").lower(),
             strategy_enabled=parse_bool(source, "STRATEGY_ENABLED", True),
