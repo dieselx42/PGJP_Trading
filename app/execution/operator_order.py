@@ -126,7 +126,14 @@ async def place_operator_order(config: Config, request: OperatorOrderRequest) ->
 
     from app.main import TradingApplication  # noqa: PLC0415 -- avoids a cycle
 
-    app = TradingApplication(config, run_id=f"operator-{new_correlation_id()}")
+    app = TradingApplication(
+        config,
+        run_id=f"operator-{new_correlation_id()}",
+        # Runs alongside the trading process, not as it: no health-server
+        # bind, and the admin client id so this cannot knock the bot off
+        # its IBKR session. See TradingApplication.__init__.
+        is_admin_instance=True,
+    )
     await app.startup()
     try:
         return await _run(app, request)
