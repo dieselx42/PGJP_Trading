@@ -132,3 +132,100 @@ class TestReconciliationGatesTheApplication:
             account_available=True,
         )
         assert app._compute_ready_state() is ApplicationState.SAFE
+
+
+class TestOrderStatusIsRecordedNotDiscarded:
+    """`orderStatus` used to log and return.
+
+    `_IBSession.order_statuses` was declared and never written to, so the
+    adapter received every status update IBKR sent and threw it away. Nothing
+    downstream could learn whether an order was accepted, rejected, or
+    cancelled -- an order counted as "submitted" because bytes had reached a
+    socket.
+
+    Observed 2026-08-19: an order was accepted (permId 2106979881) and then
+    cancelled seconds later when the placing client disconnected. Both events
+    were reported by IBKR. Neither was recorded, and finding out took an hour
+    of manual probing.
+    """
+
+    def _order_status_callback(self) -> ast.FunctionDef:
+        tree = ast.parse(SOURCE.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "orderStatus":
+                return node
+        raise AssertionError("orderStatus is gone")
+
+    @pytest.mark.safety
+    def test_the_callback_writes_the_status_somewhere(self) -> None:
+        """Logging is not recording. A log line cannot be waited on."""
+        body = ast.dump(self._order_status_callback())
+        assert "order_statuses" in body, "orderStatus does not record what it was told"
+
+    def test_an_unmapped_ibkr_status_is_an_error_not_a_guess(self) -> None:
+        """An unrecognised status must not resolve to something benign."""
+        source = SOURCE.read_text()
+        assert "IB_STATUS_MAP.get(status, OrderStatus.ERROR)" in source
+
+    def test_the_adapter_exposes_a_way_to_wait_for_one(self) -> None:
+        from app.broker.ibkr_broker import IBKRBroker
+
+        assert hasattr(IBKRBroker, "await_order_status")
+
+
+class TestStatusMeaning:
+    def _update(self, status):
+        from app.broker.models import OrderStatusUpdate
+
+        return OrderStatusUpdate(broker_order_id="3", status=status, ib_status=status.value)
+
+    def test_cancelled_is_terminal_and_not_working(self) -> None:
+        from app.enums import OrderStatus
+
+        update = self._update(OrderStatus.CANCELLED)
+        assert update.is_terminal
+        assert not update.is_working
+
+    def test_rejected_is_terminal_and_not_working(self) -> None:
+        from app.enums import OrderStatus
+
+        update = self._update(OrderStatus.REJECTED)
+        assert update.is_terminal
+        assert not update.is_working
+
+    def test_acknowledged_is_working(self) -> None:
+        from app.enums import OrderStatus
+
+        assert self._update(OrderStatus.ACKNOWLEDGED).is_working
+
+
+class TestTheOperatorReportTellsTheTruth:
+    """A cancelled order must not read as a success."""
+
+    @pytest.mark.safety
+    def test_a_cancelled_order_says_so_plainly(self) -> None:
+        from app.enums import OrderStatus
+        from app.execution.operator_order import _status_note
+
+        note = _status_note(self._update(OrderStatus.CANCELLED))
+        assert "CANCELLED" in note
+
+    @pytest.mark.safety
+    def test_no_status_is_undetermined_not_failure(self) -> None:
+        """Silence from the broker says nothing. Claiming it does is the bug."""
+        from app.execution.operator_order import _status_note
+
+        note = _status_note(None)
+        assert "UNDETERMINED" in note
+        assert "may well" in note
+
+    def test_a_working_order_says_the_broker_holds_it(self) -> None:
+        from app.enums import OrderStatus
+        from app.execution.operator_order import _status_note
+
+        assert "holding" in _status_note(self._update(OrderStatus.ACKNOWLEDGED))
+
+    def _update(self, status):
+        from app.broker.models import OrderStatusUpdate
+
+        return OrderStatusUpdate(broker_order_id="3", status=status, ib_status=status.value)

@@ -162,6 +162,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had never returned a green result before that run — which is not the same
   thing as a probe that returns green, and is worth distinguishing.
 
+- **`orderStatus` logged and returned.** `_IBSession.order_statuses` was
+  declared and never written to, so every status update IBKR sent was thrown
+  away. Nothing downstream could learn whether an order was accepted, rejected
+  or cancelled — an order counted as "submitted" because bytes had reached a
+  socket.
+
+  Observed 2026-08-19 on the first order this system ever sent: IBKR accepted
+  it (permId 2106979881) and cancelled it moments later, because the ephemeral
+  command that placed it disconnected five milliseconds after `placeOrder`.
+  IBKR reported both events. Neither was recorded, and establishing what had
+  happened took an hour of manual probing with `reqCompletedOrders`.
+
+  Statuses are now recorded, `IBKRBroker.await_order_status` waits for one, and
+  `place-order` waits before disconnecting and persists what it learns. Its
+  report distinguishes *cancelled*, *rejected*, *working* and **undetermined** —
+  silence from the broker says nothing, and claiming otherwise was the original
+  defect in a different form.
+
+  An unmapped IBKR status maps to `ERROR`, never to something benign.
+
 - **Reconciliation could not see orders it did not place.** `get_open_orders`
   used `reqOpenOrders`, which returns only the *calling client's* orders. That
   made the check blind in both directions:
