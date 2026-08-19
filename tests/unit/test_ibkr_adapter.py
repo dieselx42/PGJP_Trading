@@ -10,9 +10,13 @@ permission is pending.
 
 from __future__ import annotations
 
+import asyncio
+from decimal import Decimal
+
 import pytest
 
 from app.broker.ibkr_broker import (
+    _FIRST_TICK_POLL_SECONDS,
     CONNECTIVITY_CODES,
     INFO_CODES,
     PERMISSION_CODES,
@@ -31,7 +35,7 @@ from app.broker.models import (
     BrokerOrderRejectedError,
     BrokerPermissionError,
 )
-from app.enums import AccountType, OrderType
+from app.enums import AccountType, ConnectionState, OrderType
 
 
 class TestAccountTypeDetection:
@@ -270,3 +274,154 @@ class TestStreamingSubscriptionErrors:
         assert isinstance(found, BrokerPermissionError)
         assert "354" in str(found)
         assert session.request_error(8) is None
+
+
+class _DelayedTicks(dict):
+    """A ``ticks`` mapping that yields its value only after N consultations.
+
+    Counting the consultations is the point: it distinguishes "polled until the
+    tick arrived" from "slept once and happened to find it", which a plain
+    time-based fake cannot.
+    """
+
+    def __init__(self, deliver_on_poll: int, value: dict[str, Decimal]) -> None:
+        super().__init__()
+        self._deliver_on_poll = deliver_on_poll
+        self._value = value
+        self.polls = 0
+
+    def get(self, key, default=None):
+        self.polls += 1
+        if self.polls >= self._deliver_on_poll:
+            self[key] = self._value
+        return super().get(key, default)
+
+
+class _FakeSession:
+    """The narrow slice of `_IBSession` that `request_market_data` touches."""
+
+    def __init__(self, ticks=None, error=None) -> None:
+        self.ticks = {} if ticks is None else ticks
+        self.delayed_requests: set[int] = set()
+        self.subscribed: list[int] = []
+        self._error = error
+
+    def isConnected(self) -> bool:  # noqa: N802 -- ibapi's spelling
+        return True
+
+    def allocate_request_id(self) -> int:
+        return 4242
+
+    def reqMktData(self, request_id, *args) -> None:  # noqa: N802 -- ibapi's spelling
+        self.subscribed.append(request_id)
+
+    def request_error(self, request_id: int):
+        return self._error
+
+
+class TestFirstTickWait:
+    """Waiting for the first tick of a streaming subscription.
+
+    Streaming market data has no completion callback, so the first tick has to
+    be waited for rather than requested. That wait used to be a fixed
+    `await asyncio.sleep(0.5)`, which reported an empty tick whenever a thin
+    contract took longer than half a second to quote -- observationally
+    identical to a market where nobody is quoting, and a completely different
+    problem.
+
+    The defect stayed hidden because every earlier run against the real gateway
+    was refused with 354 before the timing mattered at all. It surfaced the
+    first minute the subscription actually worked.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_ib_contract(self, monkeypatch):
+        """`Contract` comes from ibapi, which is not a dev dependency.
+
+        Stubbed unconditionally rather than only when the extra is absent:
+        these tests are about the wait, not about contract translation, and
+        they must not behave differently depending on which environment they
+        happen to run in.
+        """
+        import app.broker.ibkr_broker as module
+
+        class _Contract:
+            pass
+
+        monkeypatch.setattr(module, "Contract", _Contract)
+
+    def _broker(self, session, **kwargs):
+        broker = IBKRBroker(host="127.0.0.1", port=4002, client_id=1, **kwargs)
+        broker._session = session
+        broker._state = ConnectionState.CONNECTED
+        return broker
+
+    async def test_it_waits_past_the_half_second_that_used_to_be_the_whole_wait(
+        self, contract
+    ) -> None:
+        # Delivered on the fourth poll: ~0.75s at the real interval, which the
+        # old fixed sleep would have given up on long before.
+        ticks = _DelayedTicks(4, {"bid": Decimal("180.25"), "ask": Decimal("180.30")})
+        broker = self._broker(_FakeSession(ticks))
+
+        tick = await broker.request_market_data(contract)
+
+        assert ticks.polls >= 4
+        assert tick.bid == Decimal("180.25")
+        assert tick.ask == Decimal("180.30")
+
+    async def test_it_returns_as_soon_as_the_tick_is_there(self, contract) -> None:
+        """A wait that always ran to its deadline would be its own defect."""
+        loop = asyncio.get_running_loop()
+        session = _FakeSession(_DelayedTicks(1, {"last": Decimal("180.00")}))
+        broker = self._broker(session, first_tick_timeout_seconds=30.0)
+
+        started = loop.time()
+        tick = await broker.request_market_data(contract)
+
+        assert tick.last == Decimal("180.00")
+        assert loop.time() - started < 5.0
+        assert session.subscribed == [4242]
+
+    async def test_a_refusal_ends_the_wait_instead_of_running_out_the_clock(self, contract) -> None:
+        """354 is answerable in a second; making a human wait 30s for it is not."""
+        loop = asyncio.get_running_loop()
+        refusal = BrokerPermissionError("IBKR 354: requested market data is not subscribed")
+        broker = self._broker(_FakeSession(error=refusal), first_tick_timeout_seconds=30.0)
+
+        started = loop.time()
+        with pytest.raises(BrokerPermissionError, match="354"):
+            await broker.request_market_data(contract)
+
+        assert loop.time() - started < 5.0
+
+    async def test_an_empty_result_after_the_full_wait_is_a_quiet_market(self, contract) -> None:
+        """Having waited properly, empty is a fact about the market, not an error."""
+        broker = self._broker(_FakeSession(), first_tick_timeout_seconds=0.01)
+
+        tick = await broker.request_market_data(contract)
+
+        assert tick.bid is None
+        assert tick.ask is None
+        assert tick.last is None
+        assert tick.is_delayed is False
+
+    async def test_a_timeout_shorter_than_the_poll_is_not_rounded_up_to_it(self, contract) -> None:
+        """The final sleep is clamped to what is left, so it cannot overshoot."""
+        loop = asyncio.get_running_loop()
+        broker = self._broker(_FakeSession(), first_tick_timeout_seconds=0.01)
+
+        started = loop.time()
+        await broker.request_market_data(contract)
+
+        assert loop.time() - started < _FIRST_TICK_POLL_SECONDS
+
+    async def test_the_subscription_is_only_created_once(self, contract) -> None:
+        """A repeat call reads the running subscription; it does not re-wait."""
+        session = _FakeSession(_DelayedTicks(1, {"last": Decimal("180.00")}))
+        broker = self._broker(session)
+
+        await broker.request_market_data(contract)
+        await broker.request_market_data(contract)
+
+        assert session.subscribed == [4242]
