@@ -162,6 +162,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had never returned a green result before that run — which is not the same
   thing as a probe that returns green, and is worth distinguishing.
 
+- **Reconciliation could not see orders it did not place.** `get_open_orders`
+  used `reqOpenOrders`, which returns only the *calling client's* orders. That
+  made the check blind in both directions:
+
+  *False alarm* — an order placed on the admin client id (`place-order`,
+  `cancel-all-orders`) was invisible to the trading process, which reported
+  `unknown_at_broker` and dropped to `SAFE` over a perfectly good order.
+  Observed on 2026-08-19 with a real resting order: the first order this system
+  ever sent broke the bot that sent it.
+
+  *False clear*, which is the one that matters — an order placed by a human in
+  TWS, another process, or a stale client id was equally invisible.
+  Reconciliation reported success and the system would have traded alongside
+  exposure it did not know existed. That is the precise failure reconciliation
+  exists to prevent, and it could never have caught it.
+
+  Now `reqAllOpenOrders`. The comparison logic was never wrong — it faithfully
+  reported what it was given — so no test of it could have found this. The
+  defect was one API call upstream, in what the adapter asked the broker for.
+
 - **`TRADING_PERMISSION_UNAVAILABLE_AT_BROKER` was impossible to satisfy.** The
   TWS API exposes no "may this account trade CME futures" flag, so the IBKR
   adapter reports `None` for every account — and `None` was treated as *not

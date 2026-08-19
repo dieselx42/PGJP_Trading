@@ -920,9 +920,29 @@ class IBKRBroker(Broker):
         return tuple(positions)
 
     async def get_open_orders(self) -> Sequence[BrokerOrderSnapshot]:
+        """Every working order at the broker, not just this client's.
+
+        ``reqAllOpenOrders`` rather than ``reqOpenOrders``, and the difference
+        is the whole point of reconciliation. ``reqOpenOrders`` returns only
+        orders placed by the *calling client id*, which makes reconciliation
+        blind in both directions:
+
+        * **False alarm.** An order this system placed on the admin client id
+          (``place-order``, ``cancel-all-orders``) is invisible to the trading
+          process, which reports ``unknown_at_broker`` and drops to SAFE over an
+          order that is perfectly fine. Observed 2026-08-19 with a real resting
+          order.
+        * **False clear**, which is the dangerous one. An order placed by
+          anything else -- a human in TWS, another process, a stale client id --
+          is invisible, reconciliation reports success, and this system trades
+          alongside exposure it does not know exists.
+
+        Reconciliation exists to answer "does our book match the broker's". It
+        cannot answer that from a per-client view, so it never could before.
+        """
         session = self._require_session()
         future = session.register(_OPEN_ORDERS_REQ_ID)
-        session.reqOpenOrders()
+        session.reqAllOpenOrders()
         rows = await self._await_request(future, what="open orders")
 
         snapshots: list[BrokerOrderSnapshot] = []
