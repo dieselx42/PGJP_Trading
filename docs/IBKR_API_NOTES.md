@@ -125,6 +125,7 @@ the keyword form. It is unit tested for all three.
 
 **Verified against a real IB Gateway paper session on 2026-08-08** — ibapi
 10.30.1, server version 187, account `DU***787`, via `app.cli ibkr-checkout`.
+**Market data added 2026-08-19**, once the CME subscription went active.
 
 | Verified against a live gateway | Still unverified |
 |---|---|
@@ -133,32 +134,36 @@ the keyword form. It is unit tested for all three.
 | Account-type detection from a real `DU` id | Fills and executions from our own orders |
 | Account summary | Commission reports |
 | Positions | `get_open_orders` (see below) |
-| Executions (empty, but the call completes) | Market data ticks (see below) |
+| Executions (empty, but the call completes) | |
 | Contract qualification against live `contractDetails` | |
 | Error classification, against codes 321, 200 and 354 | |
+| Real-time streaming ticks, `is_delayed` false | |
 
 Contract facts confirmed for MSL: multiplier `25`, min tick `0.05`, trading
 class `MSL`, exchange `CME`, timezone `US/Central`. IBKR lists expirations as
 full last-trade dates (`20260828`), not months, and quotes ten contracts —
 monthly through Jan 2027, quarterly after.
 
-### Two probes that cannot pass in this configuration
+### The one probe that cannot pass in this configuration
 
 **`OPEN_ORDERS_EMPTY`.** IB Gateway's Read-Only API mode refuses `reqOpenOrders`
 with code 321 and `reqId` `-1`. That is IBKR's behaviour, not a defect, but it
 means `get_open_orders` — and therefore order reconciliation — cannot be
 exercised until Read-Only mode is turned off at RUNBOOK step 10.
 
-**`MARKET_DATA`.** Code 354: the paper account has no live CME futures
-subscription, and IBKR offers delayed data instead. See
-`REASON_MARKET_DATA_DELAYED` — the system refuses to trade on delayed prices and
-there is no setting that permits it.
+**`MARKET_DATA` used to be the second.** Code 354: the paper account had no live
+CME futures subscription, and IBKR offers delayed data instead. That is why
+`REASON_MARKET_DATA_DELAYED` exists — the system refuses to trade on delayed
+prices and there is no setting that permits it. With the subscription active the
+probe passes on real-time ticks, and the interlock stays exactly as it was: it
+guards against a *future* silent downgrade to delayed data, which is precisely
+when nobody will be watching for one.
 
-### What the first real session found
+### What the real sessions found
 
-Three defects that unit tests against fakes could not have found, each the same
-shape: **IBKR said exactly what was wrong and the adapter turned it into an
-absence.**
+Four defects that unit tests against fakes could not have found. The first three
+share a shape: **IBKR said exactly what was wrong and the adapter turned it into
+an absence.**
 
 1. **An error with `reqId` `-1` orphaned its pending request.** A 321 refusal
    matched neither the reject-by-id path nor the fail-everything path, so the
@@ -177,9 +182,21 @@ absence.**
    check would have passed — the tick did arrive a second ago; only the price in
    it was fifteen minutes old.
 
+4. **The first tick was waited for with a fixed `sleep(0.5)`.** Half a second is
+   not long enough for a thin contract to quote, so an empty tick came back as
+   though nobody were bidding. Now polled against a monotonic deadline, ending
+   early on a tick or an error.
+
 The third is the one to remember. It was not a bug in anything that had been
 written; it was a hazard that only existed once a real broker was on the other
 end of the socket.
+
+The fourth is worth remembering for a different reason: **it was hidden behind
+the second.** Every run for months was refused with 354 before the timing could
+matter, so the code path had never once completed. Fixing a defect can expose
+one standing behind it, and a probe that has never returned a green result is
+not the same as a probe that returns green — the first was true here for
+`MARKET_DATA` right up until 2026-08-19.
 
 ---
 

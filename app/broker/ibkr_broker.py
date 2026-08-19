@@ -23,6 +23,12 @@ executions, and contract qualification against live ``contractDetails``. Error
 classification met three genuine IBKR errors -- 321, 200 and 354 -- and typed
 each correctly as non-retryable.
 
+**Streaming market data confirmed 2026-08-19**, once the CME subscription was
+active: real-time bid/ask/last on MSLQ6 during liquid hours, with
+``is_delayed`` false. The 354 refusal had masked a timing defect of ours the
+whole time -- see :meth:`IBKRBroker._await_first_tick` -- so this path had never
+run to completion before that date despite the code being months old.
+
 Still unverified: order placement, order-status callbacks, fills and commission
 reports. Those need ``ALLOW_ORDER_TRANSMIT=true`` and IB Gateway's Read-Only API
 mode off, which is RUNBOOK step 10 and a separate decision.

@@ -113,6 +113,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read-only checkout, which is now the fourth defect it has found that the unit
   tests could not — they drive fakes that answer instantly.
 
+  Confirmed fixed on 2026-08-19 against the live paper gateway: real-time
+  bid/ask/last on MSLQ6 during liquid hours, `is_delayed` false. `MARKET_DATA`
+  had never returned a green result before that run — which is not the same
+  thing as a probe that returns green, and is worth distinguishing.
+
 ## [0.1.0] — 2026-08-07
 
 Initial infrastructure. **This release cannot place an order**, by design and by
