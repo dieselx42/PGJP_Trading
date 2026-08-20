@@ -71,7 +71,7 @@ from app.state.repositories import Repositories
 from app.strategy.base import BarStrategy, Strategy
 from app.strategy.noop import build_strategy
 from app.utilities.ids import new_correlation_id, new_run_id
-from app.utilities.timeutils import utc_now
+from app.utilities.timeutils import eastern_display, utc_now
 
 _LOG = get_logger("main")
 
@@ -1117,6 +1117,7 @@ class TradingApplication:
             "database": self.database.info(),
             "performance": self.repositories.performance.get().describe(),
             "generated_at": utc_now().isoformat(),
+            "generated_at_eastern": eastern_display(utc_now()),
         }
 
     # ------------------------------------------------------------------

@@ -63,6 +63,15 @@ ENV PYTHONUNBUFFERED=1 \
     GIT_COMMIT=${GIT_COMMIT} \
     BUILD_TIMESTAMP=${BUILD_TIMESTAMP}
 
+# tzdata: the operating team reads Eastern time, and status output shows it
+# alongside UTC. Display only -- everything is stored and computed in UTC --
+# but the zone database has to exist for the display to be honest about
+# EST vs EDT. The code degrades gracefully without it; the image should not
+# need to.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
 # Fixed uid/gid so a bind-mounted ./data and ./logs on the host can be chowned
 # to a known owner (see scripts/bootstrap_dirs.sh).
 RUN groupadd --gid 10001 trader \

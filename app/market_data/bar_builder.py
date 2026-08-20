@@ -54,7 +54,7 @@ from decimal import Decimal
 from app.backtest.models import INTERVAL_SECONDS, Bar
 from app.logging_config import get_logger
 from app.market_data.models import Quote
-from app.utilities.timeutils import ensure_utc
+from app.utilities.timeutils import eastern_display, ensure_utc
 
 _LOG = get_logger("market_data.bar_builder")
 
@@ -207,6 +207,7 @@ class BarBuilder:
         return {
             "interval": self.interval,
             "in_progress": None if bucket is None else bucket.opened_at.isoformat(),
+            "in_progress_eastern": None if bucket is None else eastern_display(bucket.opened_at),
             "in_progress_samples": 0 if bucket is None else bucket.samples,
             **dict(self._counts),
             "note": (

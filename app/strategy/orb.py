@@ -72,6 +72,7 @@ from app.enums import Direction, OrderSide
 from app.logging_config import get_logger
 from app.signals.models import TradeIntent
 from app.strategy.base import BarStrategy
+from app.utilities.timeutils import eastern_hhmm
 
 _LOG = get_logger("strategy.sol_orb")
 
@@ -531,6 +532,12 @@ class SolOrbStrategy(BarStrategy):
             **super().describe(),
             "position_contracts": self._p.position_contracts,
             "sessions_utc": [t.isoformat() for t in self._p.session_opens],
+            # What those UTC opens read as on the team's clock TODAY. The
+            # date matters: 14:30 UTC is 09:30 EST in winter and 10:30 EDT in
+            # summer, and making that visible is the point -- the strategy
+            # trades fixed UTC, and a team thinking in Eastern should see
+            # exactly which local hour that lands on.
+            "sessions_eastern_today": [eastern_hhmm(t) for t in self._p.session_opens],
             # The full effective rule set, so an experiment's result records
             # exactly what ran and two runs can never be confused.
             "params_effective": {
