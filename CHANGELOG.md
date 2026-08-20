@@ -169,6 +169,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The ORB NY session was pinned to a fixed **14:30 UTC**, which is the 9:30 ET
+  equity open only in winter — through the whole DST period (March–November) it
+  opened an hour late, at 10:30 ET. The document itself gave the NY open both
+  ways ("14:30 UTC" and "9:30 AM ET"), a contradiction that resolves in favour
+  of the equity open the strategy keys off. The session is now anchored to
+  **9:30 America/New_York** and tracks DST: 13:30 UTC in summer, 14:30 in
+  winter, both 9:30 ET. London stays the document's fixed 08:00 UTC. A new
+  `SessionOpen(hour, minute, zone)` carries the anchor; `_roll_session` resolves
+  it to the bar's local date each session. The fixed-UTC hours remain reachable
+  for diagnostics via `--sessions HH:MM`, so the prior behaviour can still be
+  replayed. Storage stays UTC throughout — only the session's *derivation*
+  changed. Consequence: any backtest re-run now evaluates the 9:30 ET open, so
+  the prior −$81k baseline (computed at 10:30 ET) will move.
+
 - `request_market_data` waited a fixed half second for the first tick of a new
   subscription and then reported whatever it had. Streaming data has no
   completion callback, so the first tick has to be waited for rather than

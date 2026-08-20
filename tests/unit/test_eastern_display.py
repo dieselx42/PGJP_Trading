@@ -56,10 +56,17 @@ class TestEasternHhmm:
     def test_the_strategy_reports_both_clocks(self) -> None:
         described = SolOrbStrategy().describe()
 
-        assert described["sessions_utc"] == ["08:00:00", "14:30:00"]
+        # The anchors are season-independent, unlike the UTC values: London is
+        # fixed to UTC, NY to Eastern wall-clock so it tracks DST.
+        anchors = [s["anchor"] for s in described["sessions"]]  # type: ignore[index,union-attr]
+        assert anchors == ["08:00 UTC", "09:30 America/New_York"]
+
         eastern = described["sessions_eastern_today"]
         assert isinstance(eastern, list) and len(eastern) == 2
         assert all(e.endswith(("EST", "EDT")) for e in eastern)
+        # The NY session reads 09:30 Eastern in EVERY season -- the whole point
+        # of anchoring it to the wall-clock rather than a UTC constant.
+        assert eastern[1].startswith("09:30")
 
 
 class TestGracefulDegradation:
@@ -73,14 +80,15 @@ class TestGracefulDegradation:
 
 class TestUtcStaysTheOnlyInternalRepresentation:
     @pytest.mark.safety
-    def test_session_behaviour_is_identical_across_the_dst_boundary(self) -> None:
-        """The display changes with the season; the TRADING HOUR must not.
+    def test_the_ny_session_tracks_eastern_wall_clock_across_dst(self) -> None:
+        """Storage stays UTC, but the NY session is pinned to 9:30 ET.
 
-        If someone ever "helpfully" redefines sessions in local time, a 14:30
-        UTC winter bar and a 14:30 UTC summer bar would stop both starting a
-        session -- this is the test that catches it.
+        The trading HOUR is the Eastern wall-clock, so its UTC value must SHIFT
+        with DST -- 14:30 UTC in winter, 13:30 UTC in summer, both 9:30 ET. A
+        fixed 14:30 UTC (the old reading) held 9:30 only in winter and ran an
+        hour late all summer; this is the test that keeps the anchor honest in
+        both seasons.
         """
-        from datetime import timedelta
         from decimal import Decimal
 
         from app.backtest.models import Bar
@@ -97,12 +105,19 @@ class TestUtcStaysTheOnlyInternalRepresentation:
                 close=Decimal("100"),
             )
 
-        for month in (1, 7):  # EST and EDT
+        # 9:30 ET expressed in UTC, per season -- both must open the NY session.
+        for opened in (
+            datetime(2026, 1, 6, 14, 30, tzinfo=UTC),  # 9:30 EST
+            datetime(2026, 7, 6, 13, 30, tzinfo=UTC),  # 9:30 EDT
+        ):
             strategy = SolOrbStrategy()
-            session_open = datetime(2026, month, 6, 14, 30, tzinfo=UTC)
-            strategy.handle_bar(bar_at(session_open))
+            strategy.handle_bar(bar_at(opened))
             assert strategy.describe()["counters"]["sessions_seen"] == 1, (  # type: ignore[index]
-                f"the 14:30 UTC session must start in month {month} exactly as in any other"
+                f"9:30 ET must start the NY session at {opened.isoformat()}"
             )
-            strategy.handle_bar(bar_at(session_open + timedelta(hours=3)))
-            assert strategy.describe()["counters"]["sessions_seen"] == 1  # type: ignore[index]
+
+        # The old fixed hour is now wrong in summer: 14:30 UTC in July is an
+        # hour past the 13:30 open, so it must NOT start the NY session.
+        strategy = SolOrbStrategy()
+        strategy.handle_bar(bar_at(datetime(2026, 7, 6, 14, 30, tzinfo=UTC)))
+        assert strategy.describe()["counters"]["sessions_seen"] == 0  # type: ignore[index]

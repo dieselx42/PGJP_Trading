@@ -25,9 +25,12 @@ per contract = **$0.373/SOL**. The document's breakeven lock is $0.05 —
 below the floor, so every breakeven exit loses by arithmetic (+$50 gross,
 −$322.80 net, 58/yr ≈ −$18.7k).
 
-**Two unresolved contradictions in the source document:**
-- NY open stated as both 14:30 UTC and 9:30 ET — an hour apart under DST.
-  Deployed follows 14:30 UTC = 10:30 ET.
+**Source-document contradictions:**
+- NY open — RESOLVED. Document said both 14:30 UTC and 9:30 ET. Now anchored
+  to 9:30 America/New_York (tracks DST: 13:30 UTC summer, 14:30 winter). Was
+  14:30 UTC = 10:30 ET, an hour late all summer. Fixed-UTC still reachable via
+  `--sessions`. Re-running any backtest now tests 9:30 ET, so the −$81k
+  baseline (computed at 10:30 ET) will move.
 - CME listed SOL futures in 2025, so the document's 5-year table cannot be
   MSL — likely spot, therefore likely no commission. Would explain the gap.
 

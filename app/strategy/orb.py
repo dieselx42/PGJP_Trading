@@ -8,8 +8,9 @@ a number nobody can trust.
 
 The rules, as implemented
 -------------------------
-* Two independent sessions: London 08:00 UTC, NY 14:30 UTC. Each lasts 90
-  minutes for ENTRIES; an open trade is managed to its exit regardless.
+* Two independent sessions: London 08:00 UTC, NY 9:30 America/New_York (which
+  is 13:30 UTC in summer, 14:30 in winter). Each lasts 90 minutes for ENTRIES;
+  an open trade is managed to its exit regardless.
 * The first five 1-minute bars form the opening range (high/low across all
   five). Range under $0.80 -> the whole session is skipped.
 * After the range is fixed: a 1-minute bar CLOSING strictly beyond it is a
@@ -24,10 +25,14 @@ The rules, as implemented
 Ambiguities resolved (and worth confirming against the document's author)
 -------------------------------------------------------------------------
 * **NY open.** The document says both "14:30 UTC" and "9:30 AM ET". Those
-  coincide only in winter; during US DST 9:30 ET is 13:30 UTC. The UTC column
-  is implemented as written. If the 5-year table was computed on exchange-local
-  time, results for roughly two-thirds of the year describe a different hour
-  than this replays.
+  coincide only in winter; during US DST 9:30 ET is 13:30 UTC. Resolved to
+  **9:30 America/New_York**, the equity open the strategy keys off, anchored to
+  Eastern wall-clock so it holds across DST instead of drifting an hour every
+  spring and fall. A fixed 14:30 UTC -- the earlier reading -- was 9:30 ET only
+  in winter and ran an hour late all summer. The fixed-UTC hours remain
+  reachable for diagnostics via ``--sessions HH:MM``. Still worth confirming
+  which clock the document's 5-year table used: if it was fixed UTC, the
+  ``--sessions`` override reproduces it.
 * **Within-bar sequence.** Bars are not ticks: when one bar spans both the
   stop and a level upgrade, the order of events inside it is unknowable. The
   stop is checked FIRST, at its level from the previous bar. Pessimistic by
@@ -63,8 +68,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any
 
 from app.backtest.models import Bar
@@ -72,9 +78,61 @@ from app.enums import Direction, OrderSide
 from app.logging_config import get_logger
 from app.signals.models import TradeIntent
 from app.strategy.base import BarStrategy
-from app.utilities.timeutils import eastern_hhmm
+from app.utilities.timeutils import eastern_hhmm, utc_now
 
 _LOG = get_logger("strategy.sol_orb")
+
+
+@lru_cache(maxsize=8)
+def _zone(name: str) -> tzinfo:
+    """The tzinfo for an IANA name, cached.
+
+    A named zone (not a fixed offset) is what makes a session track DST: 9:30
+    ``America/New_York`` is 13:30 UTC in summer and 14:30 in winter, and a bot
+    keyed on the wall-clock open must follow that, not drift an hour twice a
+    year. Failure is loud on purpose -- a silently-wrong session time is the
+    kind of lie the rest of this module refuses to tell. ``"UTC"`` needs no
+    database, so it never fails even where tzdata is absent.
+    """
+    if name == "UTC":
+        return UTC
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+    return ZoneInfo(name)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionOpen:
+    """A session's opening minute, anchored to a named zone.
+
+    The document gives London as ``08:00 UTC`` and NY as ``9:30 AM ET`` -- one
+    fixed to UTC, one to Eastern wall-clock. Kept exactly that way: London is
+    ``zone="UTC"`` and never moves; NY is ``zone="America/New_York"`` and lands
+    on 9:30 Eastern in every season, which is 13:30 UTC now (EDT) and 14:30 UTC
+    in winter (EST). Storing NY as a fixed UTC time was the DST bug -- it held
+    9:30 ET only in winter and ran an hour late all summer.
+    """
+
+    hour: int
+    minute: int
+    zone: str = "UTC"
+
+    def nominal_utc(self, near: datetime) -> datetime:
+        """The UTC instant this session opens, on the local date of ``near``.
+
+        Keyed on the LOCAL date so 9:30 Eastern always resolves to that day's
+        9:30 Eastern, whatever UTC calls it. 9:30 is nowhere near the 02:00 DST
+        transition, so the wall-clock time is never ambiguous or skipped.
+        """
+        tz = _zone(self.zone)
+        local_date = near.astimezone(tz).date()
+        local_open = datetime.combine(local_date, time(self.hour, self.minute), tzinfo=tz)
+        return local_open.astimezone(UTC)
+
+    @property
+    def label(self) -> str:
+        """``09:30 America/New_York`` -- the anchor, not a season's UTC value."""
+        return f"{self.hour:02d}:{self.minute:02d} {self.zone}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,9 +142,14 @@ class OrbParams:
     #: 1,000 SOL / 25 SOL per MSL contract. "Every single trade. No adjustments."
     position_contracts: int = 40
 
-    #: Session opens, UTC. The document's UTC column; see the module docstring
-    #: on the NY/DST ambiguity.
-    session_opens: tuple[time, ...] = (time(8, 0), time(14, 30))
+    #: Session opens, each anchored to its own zone. London is the document's
+    #: fixed 08:00 UTC; NY is 9:30 America/New_York, which tracks DST rather
+    #: than drifting an hour off the 9:30 ET open twice a year. See
+    #: :class:`SessionOpen` and the module docstring.
+    session_opens: tuple[SessionOpen, ...] = (
+        SessionOpen(8, 0, "UTC"),
+        SessionOpen(9, 30, "America/New_York"),
+    )
 
     orb_minutes: int = 5
     min_orb_range: Decimal = Decimal("0.80")
@@ -162,11 +225,14 @@ def _reject_unknown_params(params: dict[str, Any]) -> None:
         raise ValueError(f"unknown strategy parameter(s) {sorted(unknown)}; known: {sorted(known)}")
 
 
-def _parse_session_opens(raw: object) -> tuple[time, ...]:
+def _parse_session_opens(raw: object) -> tuple[SessionOpen, ...]:
     """Parse ``"HH:MM"`` strings into session opens, refusing to guess.
 
-    Accepts a list/tuple of strings or one comma-separated string. UTC by
-    definition, like everything else in this system.
+    Accepts a list/tuple of strings or one comma-separated string. These are
+    UTC by definition -- the ``--sessions`` override is a diagnostic knob for
+    replaying fixed-UTC hours (e.g. testing 13:30 vs 14:30), so it stays on the
+    clock every other override in this system uses. The DST-tracking Eastern
+    anchor is the DEFAULT NY session, not something this override expresses.
     """
     if isinstance(raw, str):
         parts: list[object] = [p.strip() for p in raw.split(",") if p.strip()]
@@ -176,17 +242,21 @@ def _parse_session_opens(raw: object) -> tuple[time, ...]:
         raise ValueError(f"session_opens must be 'HH:MM[,HH:MM...]', got {raw!r}")
     if not parts:
         raise ValueError("session_opens is empty; a strategy with no sessions never trades")
-    opens: list[time] = []
+    opens: list[SessionOpen] = []
     for part in parts:
         text = str(part).strip()
         try:
             hour, minute = text.split(":")
-            opens.append(time(int(hour), int(minute)))
+            # time() validates the ranges (0<=h<24, 0<=m<60) that a bare
+            # SessionOpen would accept blindly; a "25:00" must still be refused.
+            validated = time(int(hour), int(minute))
+            opens.append(SessionOpen(validated.hour, validated.minute, "UTC"))
         except (ValueError, TypeError) as exc:
             raise ValueError(f"session open {text!r} is not a valid HH:MM time") from exc
-    if len(set(opens)) != len(opens):
-        raise ValueError(f"session_opens contains duplicates: {sorted(str(o) for o in opens)}")
-    return tuple(sorted(opens))
+    keys = [(o.hour, o.minute) for o in opens]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"session_opens contains duplicates: {sorted(o.label for o in opens)}")
+    return tuple(sorted(opens, key=lambda o: (o.hour, o.minute)))
 
 
 @dataclass
@@ -353,9 +423,7 @@ class SolOrbStrategy(BarStrategy):
     def _roll_session(self, bar: Bar) -> None:
         at = bar.opened_at
         for open_time in self._p.session_opens:
-            nominal = at.replace(
-                hour=open_time.hour, minute=open_time.minute, second=0, microsecond=0
-            )
+            nominal = open_time.nominal_utc(at)
             # The session is keyed on its NOMINAL open, and starts on any bar
             # inside the opening-range span -- so a missing 08:00 bar still
             # starts the session (which then skips itself for the gap) rather
@@ -528,16 +596,32 @@ class SolOrbStrategy(BarStrategy):
         )
 
     def describe(self) -> dict[str, object]:
+        now = utc_now()
+        # Each session resolved to TODAY's date, so a reader sees the actual
+        # UTC and Eastern hours in effect right now rather than a season-blind
+        # constant. For the Eastern-anchored NY open these two move together
+        # across DST; for London (fixed UTC) only the Eastern label moves.
+        nominals = [(so, so.nominal_utc(now)) for so in self._p.session_opens]
         return {
             **super().describe(),
             "position_contracts": self._p.position_contracts,
-            "sessions_utc": [t.isoformat() for t in self._p.session_opens],
-            # What those UTC opens read as on the team's clock TODAY. The
-            # date matters: 14:30 UTC is 09:30 EST in winter and 10:30 EDT in
-            # summer, and making that visible is the point -- the strategy
-            # trades fixed UTC, and a team thinking in Eastern should see
-            # exactly which local hour that lands on.
-            "sessions_eastern_today": [eastern_hhmm(t) for t in self._p.session_opens],
+            # Backward-compatible keys, now date-aware: the UTC and Eastern
+            # times each session actually opens at today.
+            "sessions_utc": [n.strftime("%H:%M:%S") for _, n in nominals],
+            "sessions_eastern_today": [
+                eastern_hhmm(n.timetz().replace(tzinfo=None), on=n) for _, n in nominals
+            ],
+            # The anchor itself, so "why did the UTC value change in November"
+            # has a stated answer: NY is pinned to 9:30 America/New_York, not
+            # to a UTC constant.
+            "sessions": [
+                {
+                    "anchor": so.label,
+                    "utc_today": n.strftime("%H:%M"),
+                    "date": now.date().isoformat(),
+                }
+                for so, n in nominals
+            ],
             # The full effective rule set, so an experiment's result records
             # exactly what ran and two runs can never be confused.
             "params_effective": {
@@ -545,8 +629,9 @@ class SolOrbStrategy(BarStrategy):
             },
             "counters": dict(self._counts),
             "note": (
-                "NY session runs at the document's 14:30 UTC, which is 9:30 ET only in "
-                "winter; confirm which clock the document's 5-year table used."
+                "NY session is anchored to 9:30 America/New_York and tracks DST: "
+                "13:30 UTC in summer (EDT), 14:30 UTC in winter (EST). London is the "
+                "document's fixed 08:00 UTC."
             ),
         }
 
