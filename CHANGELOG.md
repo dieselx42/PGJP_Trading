@@ -167,6 +167,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Which distribution to install is the open supply-chain decision in
   `docs/IBKR_API_NOTES.md`, and the error should not pre-empt it.
 
+### Added (strategy candidates)
+
+- `app/strategy/trend.py` — `sol-trend`, a daily Donchian trend strategy
+  (20-day breakout entry, 2×ATR stop, 3×ATR trail, 10-day channel exit),
+  aggregating UTC calendar days from the 1-minute feed. Built for the cost
+  floor the ORB post-mortem measured: a $0.373/SOL round trip is 25–93% of the
+  ORB's targets but 1–4% of the multi-day legs this strategy rides. It has no
+  breakeven rule, deliberately — the ORB's $0.05 lock below the cost floor
+  produced 58 arithmetically guaranteed losses a year. Backtest-only until the
+  team judges its replay; registered in the same registry, replayed by the
+  same engine, costs and attribution identical to the ORB's runs.
+
+- `scripts/strategy_compare.sh` — the ORB baseline, the re-derived big-range
+  ORB (Candidate A), and `sol-trend` (Candidate B), each with real costs and
+  with costs zeroed, six runs in one pass at the document's 40 contracts, then
+  the digest. One command answers "which candidate, and how much of the answer
+  is the cost model".
+
 ### Fixed
 
 - The ORB NY session was pinned to a fixed **14:30 UTC**, which is the 9:30 ET

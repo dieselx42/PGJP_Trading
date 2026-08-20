@@ -36,7 +36,17 @@ below the floor, so every breakeven exit loses by arithmetic (+$50 gross,
 
 See `docs/ORB_DOCUMENT_QUESTIONS.md`.
 
-**Open items:** run `scripts/orb_experiments.sh` on the VPS and paste the
+**Verdict detail (9:30 ET re-run, 2026-08-20).** Same −$81k at 40 ct. Raw
+edge +$4.8k/yr ≈ zero; costs $86k. Gross win rate 58.9% ≈ the document's
+57.8% — its table was almost certainly counted before costs. Clock was never
+the problem.
+
+**Replacement candidates** (built 2026-08-20): `sol-trend` (daily Donchian
+20/10 + ATR stops) and a big-range ORB re-derived against the cost floor.
+`scripts/strategy_compare.sh` runs baseline + both candidates ± costs in one
+pass on the VPS.
+
+**Open items:** run `scripts/strategy_compare.sh` on the VPS and paste the
 digest; ask the document's author the five questions; roll MSLQ6 before
 Aug 28 (no auto-rollover — manual `ibkr-checkout --contract-month`).
 

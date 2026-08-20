@@ -47,14 +47,16 @@ class NoOpStrategy(Strategy):
 
 
 def _registry() -> dict[str, type[Strategy]]:
-    # Imported here rather than at module top: the ORB strategy imports Bar
+    # Imported here rather than at module top: the bar strategies import Bar
     # from app.backtest.models, and this module is imported by the live
     # runtime's hot path.
     from app.strategy.orb import SolOrbStrategy  # noqa: PLC0415
+    from app.strategy.trend import SolTrendStrategy  # noqa: PLC0415
 
     return {
         NoOpStrategy.name: NoOpStrategy,
         SolOrbStrategy.name: SolOrbStrategy,
+        SolTrendStrategy.name: SolTrendStrategy,
     }
 
 
