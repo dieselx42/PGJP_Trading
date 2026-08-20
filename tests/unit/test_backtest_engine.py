@@ -721,3 +721,127 @@ class TestSyntheticSpread:
         assert quote.ask == Decimal("82") + MIN_TICK
         assert quote.is_delayed is False
         assert quote.source == "backtest:binance"
+
+
+class TestTradeAttribution:
+    """A closed trade knows which session, which entry, and why it exited.
+
+    Declared by the strategy on its intents and threaded through order ->
+    fill -> trade, never inferred from prices: reconstructing "was that a stop
+    or a trail" from the exit price would guess wrong exactly on the trades
+    where fills deviated from levels -- the trades an attribution exists to
+    explain. Proven here with the REAL ORB strategy through the REAL engine.
+    """
+
+    def _orb_run(self) -> BacktestRun:
+        from app.strategy.orb import SolOrbStrategy
+
+        start = datetime(2026, 1, 5, 8, 0, tzinfo=UTC)  # London session
+        prices: list[tuple[str, str]] = [("100.00", "100.00")] * 5  # flat ORB bars
+        bars = _bars(prices, start=start)
+        # Widen the range via bar highs/lows: rebuild ORB bars with real wicks.
+        bars = [
+            Bar(
+                source="coinbase",
+                symbol="SOL-USD",
+                interval="1m",
+                opened_at=start + timedelta(minutes=i),
+                open=Decimal("100.00"),
+                high=Decimal("100.50"),
+                low=Decimal("99.50"),
+                close=Decimal("100.00"),
+            )
+            for i in range(5)
+        ]
+        # Signal bar closes above the 100.50 range high; entry fills at the
+        # next bar's open; that bar then crashes through the stop; the exit
+        # fills on the bar after.
+        bars += [
+            Bar(
+                source="coinbase",
+                symbol="SOL-USD",
+                interval="1m",
+                opened_at=start + timedelta(minutes=5),
+                open=Decimal("100.40"),
+                high=Decimal("100.80"),
+                low=Decimal("100.30"),
+                close=Decimal("100.60"),
+            ),
+            Bar(
+                source="coinbase",
+                symbol="SOL-USD",
+                interval="1m",
+                opened_at=start + timedelta(minutes=6),
+                open=Decimal("100.65"),
+                high=Decimal("100.70"),
+                low=Decimal("99.40"),
+                close=Decimal("99.50"),
+            ),
+            Bar(
+                source="coinbase",
+                symbol="SOL-USD",
+                interval="1m",
+                opened_at=start + timedelta(minutes=7),
+                open=Decimal("99.45"),
+                high=Decimal("99.60"),
+                low=Decimal("99.30"),
+                close=Decimal("99.40"),
+            ),
+        ]
+        strategy = SolOrbStrategy(params={"position_contracts": 1})
+        config = backtest_config(
+            symbol="MSL",
+            max_position_contracts=2,
+            max_order_size=1,
+            max_daily_loss_usd="5000",
+            max_orders_per_hour=100,
+            max_open_orders=2,
+            max_notional_exposure_usd="100000",
+        )
+        engine = BacktestEngine(
+            config=config, contract=_contract(), strategy=strategy, session=always_tradeable
+        )
+        return engine.run(bars)
+
+    def test_the_closed_trade_carries_session_number_and_exit_reason(self) -> None:
+        run = self._orb_run()
+
+        assert len(run.trades) == 1
+        trade = run.trades[0]
+        assert trade.session == "08:00"
+        assert trade.trade_n == 1
+        assert trade.exit_reason == "stop"
+        assert trade.side == "LONG"
+
+    def test_attribution_appears_in_the_report(self) -> None:
+        from app.backtest.results import build_report
+
+        report = build_report(self._orb_run()).describe()
+        attribution = report["attribution"]
+
+        assert isinstance(attribution, dict)
+        [stop_row] = [
+            r
+            for r in attribution["by_exit_reason"]  # type: ignore[index]
+            if r["bucket"] == "stop"
+        ]
+        assert stop_row["count"] == 1
+        assert Decimal(str(stop_row["net"])) < 0
+        [session_row] = [
+            r
+            for r in attribution["by_session"]  # type: ignore[index]
+            if r["bucket"] == "08:00"
+        ]
+        assert session_row["count"] == 1
+
+    def test_a_strategy_that_stamps_nothing_lands_in_unattributed(self) -> None:
+        """Never guessed into a bucket. `_Alternating` stamps no metadata."""
+        from app.backtest.results import build_report
+
+        run = _run(_Alternating(), _flat(5))
+        report = build_report(run).describe()
+        attribution = report["attribution"]
+
+        assert isinstance(attribution, dict)
+        buckets = [r["bucket"] for r in attribution["by_exit_reason"]]  # type: ignore[index]
+        assert buckets == ["unattributed"]

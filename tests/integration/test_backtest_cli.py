@@ -493,3 +493,45 @@ class TestSessionsFlag:
 
         assert code == EXIT_OK
         assert payload["strategy"]["sessions_utc"] == ["08:00:00", "13:30:00"]
+
+
+class TestStrategyParamsFlag:
+    def test_a_typo_is_refused_with_the_known_keys_listed(
+        self, backtest_env: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code, payload = _run(
+            capsys, "backtest", "--strategy", "sol-orb", "--strategy-params", "stop_distnace=1.30"
+        )
+
+        assert code == EXIT_ERROR
+        assert payload["result"] == "INVALID_STRATEGY_PARAMS"
+        assert "stop_distance" in payload["error"], "the error teaches the right name"
+
+    def test_malformed_pairs_are_refused(
+        self, backtest_env: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code, payload = _run(
+            capsys, "backtest", "--strategy", "sol-orb", "--strategy-params", "stop_distance"
+        )
+
+        assert code == EXIT_ERROR
+        assert payload["result"] == "INVALID_STRATEGY_PARAMS"
+
+    def test_overrides_reach_the_strategy_and_are_echoed(
+        self, backtest_env: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The result records what actually ran, or experiments get confused."""
+        code, payload = _run(
+            capsys,
+            "backtest",
+            "--strategy",
+            "sol-orb",
+            "--strategy-params",
+            "stop_distance=1.30,max_trades_per_session=1",
+        )
+
+        assert code == EXIT_OK
+        effective = payload["strategy"]["params_effective"]
+        assert effective["stop_distance"] == "1.30"
+        assert effective["max_trades_per_session"] == "1"
+        assert effective["target_distance"] == "1.50"

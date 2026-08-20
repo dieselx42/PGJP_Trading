@@ -408,3 +408,76 @@ class TestDescribe:
         described = build_report(_run(trades=(_trade("1"),))).describe()
 
         assert described["trades"]["detail_truncated"] == 0  # type: ignore[index]
+
+
+class TestAttribution:
+    """The loss-locator: net is net, and buckets are exact.
+
+    The killer case is a trade with POSITIVE gross and NEGATIVE net -- the
+    breakeven exit, +$50 gross, -$322.80 after costs. An attribution that
+    quietly summed gross would report the breakeven rule as harmless when it
+    is a guaranteed bleed, which is precisely the mistake this section exists
+    to expose.
+    """
+
+    def _trade_with(
+        self, *, gross: str, net: str, exit_reason: str, session: str = "08:00", trade_n: int = 1
+    ) -> ClosedTrade:
+        return ClosedTrade(
+            opened_at=T.format(1),
+            closed_at=T.format(2),
+            side="LONG",
+            quantity=40,
+            entry_price=Decimal("200"),
+            exit_price=Decimal("200.05"),
+            gross_pnl=Decimal(gross),
+            commission=Decimal(gross) - Decimal(net),
+            net_pnl=Decimal(net),
+            session=session,
+            trade_n=trade_n,
+            exit_reason=exit_reason,
+        )
+
+    def test_net_is_net_not_gross(self) -> None:
+        """A breakeven trade: +$50 gross, -$322.80 net. The bucket must say net."""
+        trades = (
+            self._trade_with(gross="50.00", net="-322.80", exit_reason="breakeven"),
+            self._trade_with(gross="50.00", net="-322.80", exit_reason="breakeven"),
+        )
+        described = build_report(_run(trades=trades)).describe()
+
+        [row] = described["attribution"]["by_exit_reason"]  # type: ignore[index]
+        assert row["bucket"] == "breakeven"
+        assert row["net"] == "-645.60", "net after costs, never gross"
+        assert row["gross"] == "100.00", "gross reported alongside, separately"
+        assert row["avg_net"] == "-322.80"
+        assert row["wins"] == 0, "gross-positive is not a win once costs are paid"
+
+    def test_buckets_are_sorted_worst_first(self) -> None:
+        trades = (
+            self._trade_with(gross="1500", net="1227.20", exit_reason="target"),
+            self._trade_with(gross="-650", net="-1022.80", exit_reason="stop"),
+            self._trade_with(gross="50", net="-322.80", exit_reason="breakeven"),
+        )
+        described = build_report(_run(trades=trades)).describe()
+
+        order = [r["bucket"] for r in described["attribution"]["by_exit_reason"]]  # type: ignore[index]
+        assert order == ["stop", "breakeven", "target"], "the bleed leads"
+
+    def test_sessions_and_trade_numbers_slice_independently(self) -> None:
+        trades = (
+            self._trade_with(
+                gross="100", net="-172.80", exit_reason="trail", session="08:00", trade_n=1
+            ),
+            self._trade_with(
+                gross="-650", net="-922.80", exit_reason="stop", session="14:30", trade_n=2
+            ),
+        )
+        described = build_report(_run(trades=trades)).describe()
+        attribution = described["attribution"]
+
+        [ny, london] = attribution["by_session"]  # type: ignore[index]
+        assert (ny["bucket"], london["bucket"]) == ("14:30", "08:00"), "worst first"
+        [second, first] = attribution["by_trade_number"]  # type: ignore[index]
+        assert (second["bucket"], first["bucket"]) == ("2", "1")
+        assert second["net"] == "-922.80"

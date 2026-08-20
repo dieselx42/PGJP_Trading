@@ -11,13 +11,14 @@ without the caveat, and the caveat is usually the important part.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from itertools import pairwise
 from math import sqrt
 from typing import Final
 
-from app.backtest.engine import BacktestRun
+from app.backtest.engine import BacktestRun, ClosedTrade
 
 #: 1-minute bars in a 365-day year, used to annualise. Approximate by nature:
 #: a futures contract does not trade every minute of every day, and the figure
@@ -97,6 +98,7 @@ class BacktestReport:
                 "detail": [t.describe() for t in run.trades[:50]],
                 "detail_truncated": max(0, len(run.trades) - 50),
             },
+            "attribution": _attribution(run.trades),
             "refusals": {
                 "count": self.refusal_count,
                 "by_reason": self.refusals_by_reason,
@@ -115,6 +117,68 @@ class BacktestReport:
             },
             "limitations": _limitations(run),
         }
+
+
+@dataclass
+class _Bucket:
+    count: int = 0
+    wins: int = 0
+    gross: Decimal = Decimal(0)
+    net: Decimal = Decimal(0)
+
+
+def _attribution(trades: Sequence[ClosedTrade]) -> dict[str, object]:
+    """Where the money actually went, sliced three ways.
+
+    ``by_exit_reason`` answers "which exit rule is bleeding"; ``by_session``
+    answers "is one session carrying the other"; ``by_trade_number`` answers
+    "is the re-entry worth taking". Buckets are sorted worst-first, because
+    this section exists to find losses, and each row carries its share of the
+    total so a reader can see at a glance what dominates.
+
+    Trades without metadata (a strategy that does not stamp its intents) land
+    in ``unattributed`` rather than being guessed into a bucket.
+    """
+
+    def slice_by(keyfn: Callable[[ClosedTrade], str]) -> list[dict[str, object]]:
+        buckets: dict[str, _Bucket] = {}
+        for trade in trades:
+            key = keyfn(trade) or "unattributed"
+            bucket = buckets.setdefault(key, _Bucket())
+            bucket.count += 1
+            bucket.wins += 1 if trade.net_pnl > 0 else 0
+            bucket.gross += trade.gross_pnl
+            bucket.net += trade.net_pnl
+        total_net = sum((b.net for b in buckets.values()), Decimal(0))
+        rows: list[dict[str, object]] = [
+            {
+                "bucket": key,
+                "count": b.count,
+                "wins": b.wins,
+                "gross": str(b.gross),
+                "net": str(b.net),
+                "avg_net": str((b.net / b.count).quantize(Decimal("0.01"))),
+                "share_of_net": (
+                    float((b.net / total_net).quantize(Decimal("0.0001")))
+                    if total_net != 0
+                    else None
+                ),
+            }
+            for key, b in buckets.items()
+        ]
+        rows.sort(key=lambda r: Decimal(str(r["net"])))  # worst first
+        return rows
+
+    return {
+        "by_exit_reason": slice_by(lambda t: t.exit_reason),
+        "by_session": slice_by(lambda t: t.session),
+        "by_trade_number": slice_by(lambda t: str(t.trade_n) if t.trade_n else ""),
+        "note": (
+            "sorted worst-first; this section exists to locate losses. share_of_net "
+            "is the bucket's net divided by total net -- shares exceed 1 when "
+            "buckets offset each other."
+        ),
+    }
 
 
 def _limitations(run: BacktestRun) -> list[str]:

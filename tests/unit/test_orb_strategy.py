@@ -582,3 +582,138 @@ class TestSessionOverride:
     def test_malformed_sessions_are_refused_not_guessed(self, bad) -> None:
         with pytest.raises(ValueError):
             SolOrbStrategy(params={"session_opens": bad})
+
+
+class TestTunableParams:
+    """The document's numbers, overridable per replay -- and only per replay.
+
+    Every improvement hypothesis is a number: a wider stop, one trade per
+    session, a stricter range filter. The override exists so each is a
+    five-minute experiment instead of a code change, and the validation exists
+    because a typo silently ignored would replay the BASELINE while claiming
+    to be the experiment -- worse than any crash.
+    """
+
+    def test_a_wider_stop_is_honoured_in_the_levels(self) -> None:
+        strategy = SolOrbStrategy(params={"stop_distance": "1.30"})
+        _entered_long(strategy, fill_price="100.00")
+
+        # A bar that would hit the document's $0.65 stop but not the $1.30 one.
+        bars = [_bar(LONDON + timedelta(minutes=6), low="99.20", close="99.30")]
+        intents = _feed(strategy, bars)
+
+        assert intents == [], "still in the trade; the wider stop held"
+
+        # And a bar through $1.30 exits.
+        [exit_intent] = _feed(
+            strategy, [_bar(LONDON + timedelta(minutes=7), low="98.60", close="98.65")]
+        )
+        assert exit_intent.requested_position == 0
+        assert exit_intent.metadata["exit_reason"] == "stop"
+
+    def test_one_trade_per_session_stops_the_re_entry(self) -> None:
+        strategy = SolOrbStrategy(params={"max_trades_per_session": "1"})
+        next_at = _entered_long(strategy)
+        # Stop out, then price still sits above the range: the baseline would
+        # re-enter; the experiment must not.
+        _feed(strategy, [_bar(next_at, low="99.20", close="100.60")])
+        _fill(strategy, OrderSide.SELL, "99.30")
+
+        intents = _feed(strategy, [_bar(next_at + timedelta(minutes=1), close="100.70")])
+
+        assert intents == []
+        assert strategy.describe()["counters"]["signals_skipped_session_full"] == 1  # type: ignore[index]
+
+    def test_the_effective_params_are_recorded_in_describe(self) -> None:
+        strategy = SolOrbStrategy(params={"stop_distance": "1.30", "min_orb_range": "1.20"})
+
+        effective = strategy.describe()["params_effective"]
+
+        assert effective["stop_distance"] == "1.30"  # type: ignore[index]
+        assert effective["min_orb_range"] == "1.20"  # type: ignore[index]
+        assert effective["target_distance"] == "1.50", "untouched values keep the document's"  # type: ignore[index]
+
+    @pytest.mark.safety
+    def test_an_unknown_key_is_refused_never_ignored(self) -> None:
+        with pytest.raises(ValueError, match="unknown strategy parameter"):
+            SolOrbStrategy(params={"stop_distnace": "1.30"})  # the typo case
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"stop_distance": "0"},
+            {"stop_distance": "-1"},
+            {"stop_distance": "narrow"},
+            {"target_distance": "999"},
+            {"max_trades_per_session": "0"},
+            {"orb_minutes": "0"},
+            {"entry_window_minutes": "1000"},
+        ],
+    )
+    def test_out_of_range_values_are_refused(self, params) -> None:
+        with pytest.raises(ValueError):
+            SolOrbStrategy(params=params)
+
+
+class TestIntentMetadata:
+    """Attribution starts here: intents declare what they are.
+
+    Entries carry the session and which entry of the session; exits carry the
+    reason. The engine threads these to the closed trade, so a year's losses
+    can be sliced by rule instead of eyeballed.
+    """
+
+    def test_entry_intents_carry_session_and_trade_number(self) -> None:
+        strategy = SolOrbStrategy()
+        _feed(strategy, _orb_bars())
+        [intent] = _feed(strategy, [_bar(LONDON + timedelta(minutes=5), close="100.60")])
+
+        assert intent.metadata["session"] == "08:00"
+        assert intent.metadata["trade_n"] == 1
+
+    def test_the_second_entry_is_numbered_two(self) -> None:
+        strategy = SolOrbStrategy()
+        next_at = _entered_long(strategy)
+        _feed(strategy, [_bar(next_at, low="99.20", close="100.60")])  # stop hit
+        _fill(strategy, OrderSide.SELL, "99.30")
+
+        [second] = _feed(strategy, [_bar(next_at + timedelta(minutes=1), close="100.70")])
+
+        assert second.metadata["trade_n"] == 2
+
+    def test_exit_intents_carry_their_reason(self) -> None:
+        strategy = SolOrbStrategy()
+        next_at = _entered_long(strategy, fill_price="100.00")
+
+        [exit_intent] = _feed(strategy, [_bar(next_at, low="99.30", close="99.35")])
+
+        assert exit_intent.requested_position == 0
+        assert exit_intent.metadata["exit_reason"] == "stop"
+
+    def test_a_re_emitted_exit_keeps_the_original_reason(self) -> None:
+        """The reason is the decision's, not recomputed from later state.
+
+        The exit's fill can be cancelled by an untradeable bar; the re-emitted
+        intent must still say WHY the trade was exited. A breakeven exit is
+        the distinguishing case: the trade is not trailing and its stop is on
+        the profitable side, so any recomputation from levels -- "trailing ->
+        trail, else stop" -- would mislabel it, and the attribution would
+        report the breakeven rule's bleed as stop-outs.
+        """
+        strategy = SolOrbStrategy()
+        next_at = _entered_long(strategy, fill_price="100.00")
+        # Reach +$0.40: the stop moves to entry+$0.05 (breakeven lock).
+        _feed(strategy, [_bar(next_at, high="100.45", close="100.40")])
+        # Fall back through the locked stop: a BREAKEVEN exit.
+        [first] = _feed(
+            strategy, [_bar(next_at + timedelta(minutes=1), low="100.00", close="100.02")]
+        )
+        assert first.metadata["exit_reason"] == "breakeven"
+
+        # No fill arrives (cancelled); the next bar re-emits. The reason must
+        # survive verbatim.
+        [again] = _feed(
+            strategy, [_bar(next_at + timedelta(minutes=2), close="101.90", high="102.00")]
+        )
+        assert again.requested_position == 0
+        assert again.metadata["exit_reason"] == "breakeven"

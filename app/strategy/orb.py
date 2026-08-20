@@ -100,6 +100,67 @@ class OrbParams:
     trail_width: Decimal = Decimal("0.40")
 
 
+#: The document's numeric rules, each overridable in a REPLAY to answer "what
+#: if this number were different". Decimal fields are per-SOL dollars.
+_TUNABLE_DECIMALS: dict[str, tuple[Decimal, Decimal]] = {
+    # name -> (exclusive minimum, inclusive maximum). Maxima are sanity rails,
+    # not strategy opinions: $20 per SOL on a ~$200 asset is a 10% move.
+    "stop_distance": (Decimal("0"), Decimal("20")),
+    "target_distance": (Decimal("0"), Decimal("20")),
+    "breakeven_trigger": (Decimal("0"), Decimal("20")),
+    "breakeven_lock": (Decimal("0"), Decimal("20")),
+    "trail_trigger": (Decimal("0"), Decimal("20")),
+    "trail_width": (Decimal("0"), Decimal("20")),
+    "min_orb_range": (Decimal("0"), Decimal("20")),
+}
+_TUNABLE_INTS: dict[str, tuple[int, int]] = {
+    "entry_window_minutes": (1, 600),
+    "max_trades_per_session": (1, 10),
+    "orb_minutes": (1, 60),
+}
+_HANDLED_ELSEWHERE = frozenset({"position_contracts", "session_opens"})
+
+
+def _apply_tunables(p: OrbParams, params: dict[str, Any]) -> OrbParams:
+    """Override the document's numbers for one replay.
+
+    Every override is validated and every unknown key is refused (see
+    :func:`_reject_unknown_params`): a typo like ``stop_distnace`` silently
+    ignored would report the BASELINE as if it were the experiment, which is
+    worse than any crash. The effective parameters are echoed in ``describe``
+    so a result always records exactly what ran.
+    """
+    changes: dict[str, object] = {}
+    for name, (low, high) in _TUNABLE_DECIMALS.items():
+        if name not in params:
+            continue
+        try:
+            value = Decimal(str(params[name]))
+        except ArithmeticError as exc:
+            raise ValueError(f"{name}={params[name]!r} is not a number") from exc
+        if not low < value <= high:
+            raise ValueError(f"{name}={value} is outside ({low}, {high}]")
+        changes[name] = value
+    for name, (int_low, int_high) in _TUNABLE_INTS.items():
+        if name not in params:
+            continue
+        try:
+            parsed = int(str(params[name]))
+        except ValueError as exc:
+            raise ValueError(f"{name}={params[name]!r} is not an integer") from exc
+        if not int_low <= parsed <= int_high:
+            raise ValueError(f"{name}={parsed} is outside [{int_low}, {int_high}]")
+        changes[name] = parsed
+    return replace(p, **changes) if changes else p  # type: ignore[arg-type]
+
+
+def _reject_unknown_params(params: dict[str, Any]) -> None:
+    known = _HANDLED_ELSEWHERE | set(_TUNABLE_DECIMALS) | set(_TUNABLE_INTS)
+    unknown = set(params) - known
+    if unknown:
+        raise ValueError(f"unknown strategy parameter(s) {sorted(unknown)}; known: {sorted(known)}")
+
+
 def _parse_session_opens(raw: object) -> tuple[time, ...]:
     """Parse ``"HH:MM"`` strings into session opens, refusing to guess.
 
@@ -154,6 +215,13 @@ class _Trade:
     peak: Decimal  # best price reached, in the trade's favour
     trailing: bool = False
     exiting: bool = False
+    exit_reason: str | None = None
+    """Why the exit was emitted ("stop"/"breakeven"/"trail"/"target").
+
+    Stored on the trade rather than recomputed so a re-emitted exit -- after a
+    cancelled fill on an untradeable bar -- reports the ORIGINAL reason, not
+    whatever the stop level happens to look like a bar later.
+    """
 
 
 class SolOrbStrategy(BarStrategy):
@@ -188,6 +256,8 @@ class SolOrbStrategy(BarStrategy):
             # input is refused: a session at a guessed time is a backtest of a
             # strategy nobody specified.
             self._p = replace(self._p, session_opens=_parse_session_opens(sessions))
+        self._p = _apply_tunables(self._p, params or {})
+        _reject_unknown_params(params or {})
         self._session: _Session | None = None
         self._trade: _Trade | None = None
         self._position = 0
@@ -361,7 +431,14 @@ class SolOrbStrategy(BarStrategy):
         self._pending_entry = True
         self._counts["signals_taken"] += 1
         target = self._p.position_contracts * direction
-        return (self._intent(target, bar),)
+        return (
+            self._intent(
+                target,
+                bar,
+                session=session.opened_at.strftime("%H:%M"),
+                trade_n=session.trades_filled + 1,
+            ),
+        )
 
     # -- trade management ------------------------------------------------
 
@@ -373,7 +450,7 @@ class SolOrbStrategy(BarStrategy):
             # self._trade via on_fill. Still here means it was cancelled on an
             # untradeable bar: re-emit. An open position with no working exit
             # is not a state this strategy is ever willing to hold.
-            return (self._intent(0, bar),)
+            return (self._intent(0, bar, exit_reason=trade.exit_reason or "unknown"),)
 
         d = trade.direction
         favourable = bar.high if d > 0 else bar.low
@@ -420,12 +497,13 @@ class SolOrbStrategy(BarStrategy):
 
     def _exit(self, trade: _Trade, bar: Bar, reason: str) -> Sequence[TradeIntent]:
         trade.exiting = True
+        trade.exit_reason = reason.removeprefix("exits_")
         self._counts[reason] += 1
-        return (self._intent(0, bar),)
+        return (self._intent(0, bar, exit_reason=trade.exit_reason),)
 
     # -- plumbing ----------------------------------------------------------
 
-    def _intent(self, target: int, bar: Bar) -> TradeIntent:
+    def _intent(self, target: int, bar: Bar, **meta: object) -> TradeIntent:
         if target > 0:
             direction = Direction.LONG
         elif target < 0:
@@ -445,7 +523,7 @@ class SolOrbStrategy(BarStrategy):
             # signal it ever generated, silently. The backtest never showed
             # this because the replay validator has no staleness clock.
             created_at=bar.closed_at,
-            metadata={"bar_close": str(bar.close)},
+            metadata={"bar_close": str(bar.close), **meta},
         )
 
     def describe(self) -> dict[str, object]:
@@ -453,6 +531,11 @@ class SolOrbStrategy(BarStrategy):
             **super().describe(),
             "position_contracts": self._p.position_contracts,
             "sessions_utc": [t.isoformat() for t in self._p.session_opens],
+            # The full effective rule set, so an experiment's result records
+            # exactly what ran and two runs can never be confused.
+            "params_effective": {
+                name: str(getattr(self._p, name)) for name in (*_TUNABLE_DECIMALS, *_TUNABLE_INTS)
+            },
             "counters": dict(self._counts),
             "note": (
                 "NY session runs at the document's 14:30 UTC, which is 9:30 ET only in "

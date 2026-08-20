@@ -94,6 +94,13 @@ DEFAULT_SESSION_START_MINUTE = 13 * 60 + 30
 DEFAULT_SESSION_END_MINUTE = 21 * 60
 
 
+def _safe_trade_n(value: object) -> int:
+    try:
+        return int(str(value))
+    except (ValueError, TypeError):
+        return 0
+
+
 def cme_liquid_hours(moment: datetime) -> bool:
     """Weekday, inside MSL's reported liquid hours."""
     if moment.weekday() >= 5:  # Saturday, Sunday
@@ -206,12 +213,30 @@ class ClosedTrade:
 
     net_pnl: Decimal
 
+    # -- attribution, carried from the intents that caused the fills --------
+    session: str = ""
+    """The session open ("08:00"/"14:30") whose signal opened this trade."""
+
+    trade_n: int = 0
+    """1 for the session's first entry, 2 for its second. 0 = unattributed."""
+
+    exit_reason: str = ""
+    """stop / breakeven / trail / target, as the strategy declared it.
+
+    Declared, not inferred: reconstructing the reason from the price would
+    guess wrong exactly on the trades where fills deviated from levels, which
+    are the trades an attribution exists to explain.
+    """
+
     def describe(self) -> dict[str, object]:
         return {
             "opened_at": self.opened_at,
             "closed_at": self.closed_at,
             "side": self.side,
             "quantity": self.quantity,
+            "session": self.session,
+            "trade_n": self.trade_n,
+            "exit_reason": self.exit_reason,
             "entry_price": str(self.entry_price),
             "exit_price": str(self.exit_price),
             "gross_pnl": str(self.gross_pnl),
@@ -240,7 +265,15 @@ class _Book:
 
     trades: list[ClosedTrade] = field(default_factory=list)
 
-    def apply(self, fill: SimulatedFill) -> None:
+    entry_meta: dict[str, object] = field(default_factory=dict)
+    """Metadata of the intent that OPENED the current position.
+
+    Held so the closed trade can say which session and which entry of that
+    session it was, long after the entry intent itself is gone.
+    """
+
+    def apply(self, fill: SimulatedFill, *, meta: dict[str, object] | None = None) -> None:
+        meta = meta or {}
         self.commission_paid += fill.commission
         self.slippage_paid += fill.slippage_cost
         delta = fill.quantity * fill.side.sign
@@ -251,6 +284,7 @@ class _Book:
             self.average_cost = fill.price
             self.opened_at = fill.filled_at
             self.open_commission = fill.commission
+            self.entry_meta = meta
         elif (previous > 0) == (delta > 0):
             total = abs(previous) + abs(delta)
             self.average_cost = (
@@ -279,6 +313,9 @@ class _Book:
                     gross_pnl=gross,
                     commission=round_trip,
                     net_pnl=gross - round_trip,
+                    session=str(self.entry_meta.get("session", "")),
+                    trade_n=_safe_trade_n(self.entry_meta.get("trade_n")),
+                    exit_reason=str(meta.get("exit_reason", "")),
                 )
             )
             if new_quantity != 0 and (new_quantity > 0) != (previous > 0):
@@ -287,6 +324,7 @@ class _Book:
                 self.average_cost = fill.price
                 self.opened_at = fill.filled_at
                 self.open_commission = fill.commission - exit_share
+                self.entry_meta = meta
             else:
                 self.open_commission -= entry_share
 
@@ -295,6 +333,7 @@ class _Book:
             self.average_cost = Decimal(0)
             self.opened_at = None
             self.open_commission = Decimal(0)
+            self.entry_meta = {}
 
     def unrealized(self, price: Decimal) -> Decimal:
         if self.quantity == 0:
@@ -372,6 +411,10 @@ class BacktestEngine:
             # strategy.
             max_signal_age_seconds=float("inf"),
         )
+        #: broker order id -> the metadata of the intent that caused it, so a
+        #: fill can be attributed to the session/trade/exit-reason it belongs
+        #: to. Popped on settle; a replay holds at most a handful at once.
+        self._order_meta: dict[str, dict[str, object]] = {}
         self.broker = BacktestBroker(
             min_tick=contract.min_tick or Decimal("0.01"),
             multiplier=Decimal(contract.multiplier or "1"),
@@ -402,7 +445,7 @@ class BacktestEngine:
             # that produced it -- that would be trading on a price the strategy
             # had already seen.
             for fill in self.broker.settle(bar, tradeable=tradeable):
-                book.apply(fill)
+                book.apply(fill, meta=self._order_meta.pop(fill.order_id, None))
                 # The strategy learns what its intent actually cost BEFORE it
                 # sees this bar, exactly as live: the fill happened at this
                 # bar's open, the bar completes after it. A strategy that sets
@@ -583,7 +626,7 @@ class BacktestEngine:
 
         from app.broker.models import OrderRequest  # noqa: PLC0415 - avoids a cycle
 
-        self.broker.place_order(
+        placed = self.broker.place_order(
             OrderRequest(
                 internal_order_id=f"bt-{intent.intent_id}",
                 correlation_id=intent.correlation_id or intent.intent_id,
@@ -593,6 +636,8 @@ class BacktestEngine:
                 order_type=OrderType.MARKET,
             )
         )
+        if placed.broker_order_id:
+            self._order_meta[placed.broker_order_id] = dict(intent.metadata)
         orders.append(bar.opened_at)
         return None
 

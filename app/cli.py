@@ -783,6 +783,21 @@ def cmd_backtest(config: Config, args: argparse.Namespace) -> int:
         # changing when a deployed strategy trades is a specification change,
         # not a configuration knob.
         strategy_params["session_opens"] = args.sessions
+    if args.strategy_params:
+        # Same rule: experiments live in the replay. The strategy validates
+        # every key and value and refuses unknowns, so a typo cannot silently
+        # replay the baseline while claiming to be the experiment.
+        for pair in args.strategy_params.split(","):
+            if "=" not in pair:
+                _emit(
+                    {
+                        "result": "INVALID_STRATEGY_PARAMS",
+                        "error": f"{pair!r} is not key=value",
+                    }
+                )
+                return EXIT_ERROR
+            key, _, value = pair.partition("=")
+            strategy_params[key.strip()] = value.strip()
     try:
         strategy = build_strategy(
             args.strategy or config.strategy_name, params=strategy_params or None
@@ -1109,6 +1124,17 @@ def build_parser() -> argparse.ArgumentParser:
                 "--strategy",
                 default=None,
                 help="registered strategy name; defaults to STRATEGY_NAME",
+            )
+            sub.add_argument(
+                "--strategy-params",
+                default=None,
+                metavar="k=v[,k=v]",
+                help=(
+                    "override the strategy's numeric rules for THIS replay only, e.g. "
+                    "'stop_distance=1.00,max_trades_per_session=1'. The strategy "
+                    "validates every key and refuses unknowns. The live runtime has no "
+                    "such override: experiments live in the replay."
+                ),
             )
             sub.add_argument(
                 "--sessions",
