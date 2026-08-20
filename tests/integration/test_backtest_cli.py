@@ -471,3 +471,25 @@ class TestContractExpiryIsVisible:
 
         assert payload["expiry"]["known"] is False
         assert "ibkr-checkout" in payload["expiry"]["detail"]
+
+
+class TestSessionsFlag:
+    def test_malformed_sessions_are_refused_before_anything_runs(
+        self, backtest_env: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code, payload = _run(capsys, "backtest", "--strategy", "sol-orb", "--sessions", "25:99")
+
+        assert code == EXIT_ERROR
+        assert payload["result"] == "INVALID_STRATEGY_PARAMS"
+
+    def test_an_overridden_session_is_reported_in_the_result(
+        self, backtest_env: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The result must say which clock it replayed, or the diagnostic
+        answers nothing."""
+        code, payload = _run(
+            capsys, "backtest", "--strategy", "sol-orb", "--sessions", "08:00,13:30"
+        )
+
+        assert code == EXIT_OK
+        assert payload["strategy"]["sessions_utc"] == ["08:00:00", "13:30:00"]

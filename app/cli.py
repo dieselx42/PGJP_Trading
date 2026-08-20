@@ -778,6 +778,11 @@ def cmd_backtest(config: Config, args: argparse.Namespace) -> int:
         # The same override the live runtime honours, so a replay can be run at
         # the size paper trading will actually use.
         strategy_params["position_contracts"] = config.strategy_position_contracts
+    if args.sessions:
+        # Replay-only. The live runtime has no session override, deliberately:
+        # changing when a deployed strategy trades is a specification change,
+        # not a configuration knob.
+        strategy_params["session_opens"] = args.sessions
     try:
         strategy = build_strategy(
             args.strategy or config.strategy_name, params=strategy_params or None
@@ -1104,6 +1109,17 @@ def build_parser() -> argparse.ArgumentParser:
                 "--strategy",
                 default=None,
                 help="registered strategy name; defaults to STRATEGY_NAME",
+            )
+            sub.add_argument(
+                "--sessions",
+                default=None,
+                metavar="HH:MM[,HH:MM]",
+                help=(
+                    "override the strategy's session opens (UTC) for THIS replay only. "
+                    "A diagnostic: the ORB document says both '14:30 UTC' and '9:30 ET' "
+                    "for the NY open, an hour apart during US DST -- replay both and "
+                    "let the data answer. The live runtime has no such override."
+                ),
             )
             sub.add_argument(
                 "--session",

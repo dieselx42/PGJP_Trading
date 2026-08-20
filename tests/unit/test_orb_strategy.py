@@ -543,3 +543,42 @@ class TestRegistryAndLiveRefusal:
             assert app.bar_builder is None
         finally:
             asyncio.run(app.shutdown())
+
+
+class TestSessionOverride:
+    """The diagnostic knob for the document's NY-clock contradiction.
+
+    "14:30 UTC" and "9:30 AM ET" are an hour apart for two-thirds of the year.
+    Rather than argue, replay both. The override exists only on the backtest
+    CLI -- the live runtime never passes it, because changing when a deployed
+    strategy trades is a specification change, not a configuration knob.
+    """
+
+    def test_an_overridden_session_is_honoured(self) -> None:
+        strategy = SolOrbStrategy(params={"session_opens": "13:30"})
+        at = datetime(2026, 1, 5, 13, 30, tzinfo=UTC)
+        _feed(strategy, _orb_bars(at))
+        [intent] = _feed(strategy, [_bar(at + timedelta(minutes=5), close="100.60")])
+
+        assert intent.requested_position == 40
+        assert strategy.describe()["sessions_utc"] == ["13:30:00"]  # type: ignore[index]
+
+    def test_the_default_sessions_no_longer_fire_when_overridden(self) -> None:
+        """The override REPLACES the sessions; it does not add to them."""
+        strategy = SolOrbStrategy(params={"session_opens": "13:30"})
+        _feed(strategy, _orb_bars(LONDON))
+        intents = _feed(strategy, [_bar(LONDON + timedelta(minutes=5), close="100.60")])
+
+        assert intents == []
+        assert strategy.describe()["counters"]["sessions_seen"] == 0  # type: ignore[index]
+
+    def test_a_list_and_a_comma_string_parse_alike(self) -> None:
+        a = SolOrbStrategy(params={"session_opens": "08:00,13:30"})
+        b = SolOrbStrategy(params={"session_opens": ["08:00", "13:30"]})
+
+        assert a.describe()["sessions_utc"] == b.describe()["sessions_utc"]
+
+    @pytest.mark.parametrize("bad", ["25:00", "nine-thirty", "", "08:00,08:00", 1430])
+    def test_malformed_sessions_are_refused_not_guessed(self, bad) -> None:
+        with pytest.raises(ValueError):
+            SolOrbStrategy(params={"session_opens": bad})

@@ -100,6 +100,33 @@ class OrbParams:
     trail_width: Decimal = Decimal("0.40")
 
 
+def _parse_session_opens(raw: object) -> tuple[time, ...]:
+    """Parse ``"HH:MM"`` strings into session opens, refusing to guess.
+
+    Accepts a list/tuple of strings or one comma-separated string. UTC by
+    definition, like everything else in this system.
+    """
+    if isinstance(raw, str):
+        parts: list[object] = [p.strip() for p in raw.split(",") if p.strip()]
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        raise ValueError(f"session_opens must be 'HH:MM[,HH:MM...]', got {raw!r}")
+    if not parts:
+        raise ValueError("session_opens is empty; a strategy with no sessions never trades")
+    opens: list[time] = []
+    for part in parts:
+        text = str(part).strip()
+        try:
+            hour, minute = text.split(":")
+            opens.append(time(int(hour), int(minute)))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"session open {text!r} is not a valid HH:MM time") from exc
+    if len(set(opens)) != len(opens):
+        raise ValueError(f"session_opens contains duplicates: {sorted(str(o) for o in opens)}")
+    return tuple(sorted(opens))
+
+
 @dataclass
 class _Session:
     """One session's lifecycle, from open to exhausted."""
@@ -151,6 +178,16 @@ class SolOrbStrategy(BarStrategy):
                     f"1..{self._p.position_contracts}, got {size}"
                 )
             self._p = replace(self._p, position_contracts=size)
+        sessions = (params or {}).get("session_opens")
+        if sessions is not None:
+            # A DIAGNOSTIC knob, reachable only from the backtest CLI -- the
+            # live runtime never passes it. It exists because the document
+            # contradicts itself about the NY open (14:30 UTC vs 9:30 ET, an
+            # hour apart during US DST), and a replay at each candidate hour
+            # answers the question with data instead of an argument. Malformed
+            # input is refused: a session at a guessed time is a backtest of a
+            # strategy nobody specified.
+            self._p = replace(self._p, session_opens=_parse_session_opens(sessions))
         self._session: _Session | None = None
         self._trade: _Trade | None = None
         self._position = 0
