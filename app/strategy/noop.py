@@ -50,11 +50,13 @@ def _registry() -> dict[str, type[Strategy]]:
     # Imported here rather than at module top: the bar strategies import Bar
     # from app.backtest.models, and this module is imported by the live
     # runtime's hot path.
+    from app.strategy.hold import SolHoldStrategy  # noqa: PLC0415
     from app.strategy.orb import SolOrbStrategy  # noqa: PLC0415
     from app.strategy.trend import SolTrendStrategy  # noqa: PLC0415
 
     return {
         NoOpStrategy.name: NoOpStrategy,
+        SolHoldStrategy.name: SolHoldStrategy,
         SolOrbStrategy.name: SolOrbStrategy,
         SolTrendStrategy.name: SolTrendStrategy,
     }
