@@ -2,10 +2,15 @@
 #
 # Backtest the ORB baseline against both replacement candidates, in one pass.
 #
-# Three strategies, each run twice -- once with real costs and once with costs
+# Each strategy is run twice -- once with real costs and once with costs
 # zeroed -- so every row answers two questions at once: what would it have
 # made, and how much of that answer is the cost model. All runs are at the
 # document's 40 contracts (1,000 SOL), so the dollars compare like for like.
+#
+# z-hold-benchmark is the row that matters most and the one the earlier
+# comparisons lacked: passive long exposure, rolled quarterly. An active
+# strategy that does not beat it is destroying value relative to doing
+# nothing, however good its own numbers look in isolation.
 #
 # Read-only, same as orb_experiments.sh: `backtest` reads `bars` and
 # `contract_metadata`, writes nothing, cannot reach a broker, and cannot
@@ -44,6 +49,7 @@ BIG_RANGE="position_contracts=40,min_orb_range=3.00,stop_distance=2.00,target_di
 
 # name|description|strategy flags
 RUNS=(
+  "z-hold-benchmark|BENCHMARK: passive long, rolled quarterly|--strategy sol-hold --strategy-params position_contracts=40"
   "e1-baseline|ORB, document verbatim, real costs|--strategy sol-orb --strategy-params position_contracts=40"
   "e0-orb-zerocost|ORB raw edge (costs removed)|--strategy sol-orb --strategy-params position_contracts=40 ${ZEROCOST[*]}"
   "a-big-range|Candidate A: big-range ORB, real costs|--strategy sol-orb --strategy-params $BIG_RANGE"
