@@ -123,6 +123,17 @@ class RiskContext:
         return self.current_position + self.order_quantity * self.order_side.sign
 
 
+def _reduces_exposure(context: RiskContext) -> bool:
+    """True when the order strictly shrinks the position without flipping it.
+
+    Flipping is NOT reducing: a reversal opens fresh exposure in the other
+    direction, and a trapped-loser exemption must not become a licence to
+    keep trading after the day's limit is hit.
+    """
+    current, projected = context.current_position, context.projected_position
+    return abs(projected) < abs(current) and current * projected >= 0
+
+
 class RiskManager:
     """Evaluates a proposed trade against every control."""
 
@@ -254,7 +265,7 @@ class RiskManager:
         checks: Sequence[str | None] = (
             limit_checks.check_order_size(risk, context.order_quantity),
             limit_checks.check_position_size(risk, context.projected_position),
-            limit_checks.check_daily_loss(risk, context.daily_pnl),
+            self._daily_loss_reason(context),
             limit_checks.check_orders_per_hour(risk, context.orders_last_hour),
             limit_checks.check_open_orders(risk, context.open_orders_count),
             limit_checks.check_notional_exposure(
@@ -265,6 +276,26 @@ class RiskManager:
             ),
         )
         reasons.extend(reason for reason in checks if reason is not None)
+
+    def _daily_loss_reason(self, context: RiskContext) -> str | None:
+        """The daily-loss verdict, with one exemption and no others.
+
+        The brake must never refuse the order that CLOSES the losing position.
+        Applied unconditionally -- as it was -- it did exactly that: the day's
+        loss crossed the limit, the exit was rejected, and the position stayed
+        open, losing, with no way out but an operator noticing. A limit that
+        traps a loser is the opposite of a risk control.
+
+        So a BREACH is waived for an order that strictly reduces exposure, and
+        nothing else is. In particular an UNCONFIGURED limit still refuses:
+        zero means NOT CONFIGURED everywhere in this system, and a
+        misconfigured deployment must not quietly acquire an exit path that a
+        correctly configured one lacks.
+        """
+        reason = limit_checks.check_daily_loss(self._config.risk, context.daily_pnl)
+        if reason == limit_checks.REASON_DAILY_LOSS_EXCEEDED and _reduces_exposure(context):
+            return None
+        return reason
 
     # -- reporting --------------------------------------------------------
 

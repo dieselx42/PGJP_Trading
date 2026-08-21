@@ -464,6 +464,112 @@ def test_10_a_huge_order_under_zero_limits_is_still_refused(contract) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CRITICAL SAFETY TEST 11 -- the daily-loss brake must not trap a losing position
+# ---------------------------------------------------------------------------
+
+
+def test_11_daily_loss_limit_does_not_refuse_the_order_that_closes_the_loser(
+    contract,
+) -> None:
+    """A breached daily-loss limit must still let the position be CLOSED.
+
+    Checked unconditionally -- as it was -- the brake refused the exit: the
+    day's loss crossed the limit, the closing order was rejected, and the
+    losing position stayed open with no way out except an operator noticing.
+    A limit that traps a loser is the opposite of a risk control.
+    """
+    config = Config.from_env(
+        permissive_env(
+            MAX_DAILY_LOSS_USD="500", MAX_ORDER_SIZE="10", MAX_POSITION_CONTRACTS="10"
+        )
+    )
+    decision = RiskManager(config).evaluate(
+        all_green_risk_context(
+            contract,
+            current_position=5,
+            order_side=OrderSide.SELL,
+            order_quantity=5,  # -> flat
+            daily_pnl=Decimal("-5000"),  # far past the limit
+        )
+    )
+    assert decision.approved, f"the closing order was refused: {decision.reasons}"
+
+
+def test_11_a_partial_reduction_is_also_allowed(contract) -> None:
+    config = Config.from_env(
+        permissive_env(
+            MAX_DAILY_LOSS_USD="500", MAX_ORDER_SIZE="10", MAX_POSITION_CONTRACTS="10"
+        )
+    )
+    decision = RiskManager(config).evaluate(
+        all_green_risk_context(
+            contract,
+            current_position=5,
+            order_side=OrderSide.SELL,
+            order_quantity=2,  # 5 -> 3
+            daily_pnl=Decimal("-5000"),
+        )
+    )
+    assert decision.approved
+
+
+@pytest.mark.parametrize(
+    ("current", "side", "quantity", "what"),
+    [
+        (0, OrderSide.BUY, 1, "opening from flat"),
+        (5, OrderSide.BUY, 1, "adding to a loser"),
+        (5, OrderSide.SELL, 8, "reversing through flat"),
+    ],
+)
+def test_11_the_exemption_does_not_licence_new_exposure(
+    current: int, side: OrderSide, quantity: int, what: str, contract
+) -> None:
+    """Only shrinking is exempt. Opening, adding and REVERSING must still be
+    refused once the day's limit is breached -- otherwise the exemption
+    becomes a licence to keep trading, which is what the limit exists to stop.
+    """
+    config = Config.from_env(
+        permissive_env(
+            MAX_DAILY_LOSS_USD="500", MAX_ORDER_SIZE="10", MAX_POSITION_CONTRACTS="10"
+        )
+    )
+    decision = RiskManager(config).evaluate(
+        all_green_risk_context(
+            contract,
+            current_position=current,
+            order_side=side,
+            order_quantity=quantity,
+            daily_pnl=Decimal("-5000"),
+        )
+    )
+    assert not decision.approved, f"{what} was allowed past a breached daily loss limit"
+    assert "MAX_DAILY_LOSS_USD_EXCEEDED" in decision.reasons
+
+
+def test_11_an_unconfigured_daily_loss_limit_still_refuses_a_reducing_order(
+    contract,
+) -> None:
+    """The exemption is for a BREACHED limit, not an absent one. Zero means
+    NOT CONFIGURED everywhere else in this system and must keep meaning it
+    here, or a misconfigured deployment would quietly gain an exit path.
+    """
+    config = Config.from_env(
+        permissive_env(MAX_DAILY_LOSS_USD="0", MAX_ORDER_SIZE="10", MAX_POSITION_CONTRACTS="10")
+    )
+    decision = RiskManager(config).evaluate(
+        all_green_risk_context(
+            contract,
+            current_position=5,
+            order_side=OrderSide.SELL,
+            order_quantity=5,
+            daily_pnl=Decimal("0"),
+        )
+    )
+    assert not decision.approved
+    assert "MAX_DAILY_LOSS_USD_NOT_CONFIGURED" in decision.reasons
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: the deployed configuration cannot transmit through the real path
 # ---------------------------------------------------------------------------
 

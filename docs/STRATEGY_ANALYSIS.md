@@ -184,19 +184,39 @@ costs and adjusted for risk, is destroying value relative to doing nothing.
 None of the above is decidable on one year of data. In rough order of value
 per unit of effort:
 
-1. **More history.** One year gives 12 trend signals. Importing 2021→2025 SOL
-   history gives roughly 60 — enough for the trend result to mean something.
-   This is the single highest-value next step and costs one command.
-2. **Out-of-sample discipline.** Any parameter chosen by looking at a result
+1. **More history — as a robustness check, not a verdict.** One year gives 12
+   trend signals; importing 2021→2025 gives roughly 60. That is worth having,
+   but it does **not** settle anything, and an earlier draft of this document
+   wrongly said it would. At the per-trade Sharpe the trend result implies
+   (0.4/√12 ≈ 0.116), the expected t-statistic is:
+
+   | n | E[t] |
+   |---|---|
+   | 12 (today) | 0.40 |
+   | 60 (2021–2025) | 0.89 |
+   | 200 | 1.63 |
+
+   Significance needs |t| ≈ 1.96. So even 200 trades would probably not clear
+   the bar. The five-year run will produce a **confident-looking number
+   carrying almost no information** — and the real danger is that it then gets
+   tuned against. Label it a robustness check in writing *before* running it.
+
+2. **A sign-flip null.** With n≈12 the only way to get a p-value without
+   waiting years is to keep the strategy's actual signal dates and randomise
+   only the *direction*, over a few hundred seeds, at identical costs and
+   sizing. The strategy is interesting only if its net beats the 95th
+   percentile of that distribution. This costs compute rather than years and
+   is the highest-value inference work available.
+3. **Out-of-sample discipline.** Any parameter chosen by looking at a result
    is fitted to it. The honest procedure is to fix parameters on one period
    and measure on another that was never examined.
-3. **The document author's answers** (`docs/ORB_DOCUMENT_QUESTIONS.md`). One
+4. **The document author's answers** (`docs/ORB_DOCUMENT_QUESTIONS.md`). One
    question could still change the ORB verdict: whether the 5-year table
    assumed **resting stops filling at their exact price**. This replay fills
    exits at the next bar's open, which is materially more pessimistic on a
    $0.65 stop applied to every loser. If the table assumed the optimistic
    fill, an optimistic-fill run is needed to bracket the truth.
-4. **Futures data instead of spot.** Every number here is measured on spot.
+5. **Futures data instead of spot.** Every number here is measured on spot.
    No basis, no roll, no CME session breaks, and volume that does not reflect
    the futures book. Phase 4 of `BACKTESTING_SCOPE.md` compares the two once
    IBKR historical data is reachable; the difference is a measurement of how

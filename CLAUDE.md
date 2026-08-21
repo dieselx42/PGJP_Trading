@@ -54,7 +54,11 @@ pass on the VPS.
   ($373/trade ≈ 4% of move) but entries lost; n too small to judge.
 
 **Open items:** import 2021→2025 SOL history and re-run `strategy_compare.sh`
-(n≈60 settles candidate B); ask the document's author the five questions
+— a ROBUSTNESS CHECK, not a verdict: at the implied per-trade Sharpe, n≈60
+gives E[t]≈0.89 against the 1.96 needed, so it will look confident and settle
+nothing (an earlier note here wrongly said it would settle candidate B). The
+sign-flip null in `docs/STRATEGY_ANALYSIS.md` §7 is the real inference work.
+Also: ask the document's author the five questions
 (only Q2 resting-stop fills could still rescue its table); roll MSLQ6 before
 Aug 28 (no auto-rollover — `ibkr-checkout --contract-month 202609`, update
 DEFAULT_CONTRACT_MONTH, restart); decide whether to stay armed meanwhile.

@@ -187,6 +187,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The daily-loss limit could refuse the order that closed the losing
+  position.** `check_daily_loss` ran on every intent with no reduce-only
+  branch, so once the day's loss crossed `MAX_DAILY_LOSS_USD` the exit was
+  rejected too — the position stayed open and went on losing, with no way out
+  but an operator noticing. A limit that traps a loser is the opposite of a
+  risk control. A breach is now waived for an order that *strictly reduces*
+  exposure, and for nothing else: opening, adding, and reversing through flat
+  are all still refused, and an **unconfigured** limit (zero, meaning NOT
+  CONFIGURED) still refuses everything including exits, so a misconfigured
+  deployment cannot quietly acquire an exit path a correct one lacks. Found by
+  an adversarial design review; four tests pin it, two of them
+  mutation-verified in both directions (removing the exemption fails; widening
+  it to permit reversals fails).
+
 - The backtest fed the replay's **cumulative** realized P&L to the
   MAX_DAILY_LOSS_USD check, which is a *daily* limit. The first day a losing
   strategy's running total crossed the limit, every later entry in the replay
