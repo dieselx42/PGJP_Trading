@@ -96,7 +96,7 @@ From the above, any strategy on this instrument must:
 ## 4. The candidates, measured
 
 ```
-z-hold-benchmark  passive long, rolled quarterly           <- run this; see §5
+z-hold-benchmark  passive long, rolled quarterly           <- run this; see §6
 e1-baseline       ORB verbatim              net  -92,984 | 248 trades | 25.0%
 a-big-range       ORB, $3 range / $6 target net   +1,637 |   1 trade  |  n/a
 b-trend           daily Donchian 20/10      net  -11,354 |  12 trades | 25.0%
@@ -116,7 +116,48 @@ the average move, against the ORB's 25–93%. It still lost, on 12 trades, and
 routinely have losing years at 25% win rates; that is the shape of the return
 distribution, not evidence of failure.
 
-## 5. The row that was missing: does trading beat not trading?
+## 5. Candidate C (`sol-momentum`) — the design this points at
+
+Built against the three diagnosed failures, and against nothing else. Every
+default is a prior, not a value chosen by looking at a result.
+
+| Change | Why | Prior or guess? |
+|---|---|---|
+| **Size by risk, not by decree.** `contracts = floor(risk_budget / (stop_per_sol x 25))`, capped at 40 | A fixed 40 contracts risks $10k at ATR $5 and $30k at ATR $15 — the same "size", triple the risk. Now every trade risks the same dollars at its stop, and exposure falls exactly when the market is most dangerous | **Prior.** Standard practice, no parameter tuned on this data |
+| **Cost gate**: refuse entries whose stop is under 25x the round trip ($9.32/SOL) | The ORB paid $0.373 to chase $0.40. This bounds the toll at ~4% of risk *structurally*, rather than leaving it as something a reader checks afterwards | **Prior**, derived from the measured cost — the gate moves if the fill model does |
+| **Regime filter**: longs only above the 100-day mean, shorts only below | A breakout against the long-term trend is the one most likely to be noise | **Weakest link.** Long-standing published practice, but the most exposed to the fitting critique — so it is measured, see below |
+| **No breakeven rule** | 64 of the ORB's exits were arithmetically guaranteed losses | **Prior.** Structural: no rule here can lock in less than the cost floor |
+
+Sizing worked through, at the $5,000 default and a 2xATR stop:
+
+| ATR | Stop/SOL | Risk/contract | Contracts | Dollars risked |
+|---|---|---|---|---|
+| $5 | $10 | $250 | 20 | $5,000 |
+| $10 | $20 | $500 | 10 | $5,000 |
+| $20 | $40 | $1,000 | 5 | $5,000 |
+
+Size halves as volatility doubles. A signal that sizes below one contract is
+**skipped**, not rounded up — rounding up is the moment a risk framework
+becomes a suggestion.
+
+**The two opinionated rules are ablated on every run.** `strategy_compare.sh`
+runs `c1-momentum-no-regime` and `c2-momentum-no-costgate` alongside the
+strategy itself. If a rule is not earning its place, that pair says so without
+anyone having to ask — which is the check that keeps a "designed" rule from
+quietly being a fitted one.
+
+### What this is not
+
+It is not a claim of profit, and it should not be read as one. The design
+panel that produced it included a lens whose whole job was to argue against
+trading this at all, and its finding stands: **every P&L result measured on
+this instrument has a t-statistic under 0.2.** The only statistically
+significant number in the whole body of evidence is the cost. So what is
+engineered here is exactly the part the evidence supports — that costs and
+risk are controlled, and that no rule is a guaranteed loser. Whether a
+directional edge exists is a question for out-of-sample data.
+
+## 6. The row that was missing: does trading beat not trading?
 
 Three strategies were measured and none was ever compared against **doing
 nothing**. `sol-hold` is that comparison: passive long exposure, flattened and
@@ -138,7 +179,7 @@ strategy to clear.
 **This is the row to read first.** Any strategy that does not beat it, after
 costs and adjusted for risk, is destroying value relative to doing nothing.
 
-## 6. What would actually settle this
+## 7. What would actually settle this
 
 None of the above is decidable on one year of data. In rough order of value
 per unit of effort:
@@ -161,7 +202,7 @@ per unit of effort:
    IBKR historical data is reachable; the difference is a measurement of how
    much the proxy was lying.
 
-## 7. Caveats that should travel with every number here
+## 8. Caveats that should travel with every number here
 
 - **Spot, not futures.** Different instrument. Stated on every result.
 - **One year.** Twelve trades for the trend candidate, one for candidate A.

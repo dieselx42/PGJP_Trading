@@ -68,7 +68,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
-from itertools import pairwise
 from typing import Any
 
 from app.backtest.models import Bar
@@ -76,6 +75,7 @@ from app.enums import Direction, OrderSide
 from app.logging_config import get_logger
 from app.signals.models import TradeIntent
 from app.strategy.base import BarStrategy
+from app.strategy.daily import DailyAggregator, average_true_range, channel
 
 _LOG = get_logger("strategy.sol_trend")
 
@@ -152,22 +152,6 @@ def _reject_unknown_params(params: dict[str, Any]) -> None:
 
 
 @dataclass
-class _Day:
-    """One UTC calendar day, aggregated from the 1-minute bars it contained."""
-
-    day: date
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-
-    def absorb(self, bar: Bar) -> None:
-        self.high = max(self.high, bar.high)
-        self.low = min(self.low, bar.low)
-        self.close = bar.close
-
-
-@dataclass
 class _Trade:
     """The open position, managed bar by bar from its actual fill price."""
 
@@ -227,9 +211,10 @@ class SolTrendStrategy(BarStrategy):
             )
 
         #: Completed days, oldest first, trimmed to the longest window + 1.
-        self._days: list[_Day] = []
-        self._current: _Day | None = None
-        self._just_completed: _Day | None = None
+        self._daily = DailyAggregator(
+            keep=max(self._p.entry_channel_days, self._p.exit_channel_days, self._p.atr_days)
+        )
+        self._just_completed = False
         self._trade: _Trade | None = None
         self._position = 0
         self._pending_entry = False
@@ -253,10 +238,6 @@ class SolTrendStrategy(BarStrategy):
     def position(self) -> int:
         """Signed contracts this strategy believes it holds. See base class."""
         return self._position
-
-    @property
-    def _max_window(self) -> int:
-        return max(self._p.entry_channel_days, self._p.exit_channel_days, self._p.atr_days)
 
     # ------------------------------------------------------------------
     # Fill feedback: the ONLY place position and entry price come from
@@ -334,74 +315,40 @@ class SolTrendStrategy(BarStrategy):
     # -- day lifecycle -----------------------------------------------------
 
     def _roll_day(self, bar: Bar) -> None:
-        """Aggregate the bar into its UTC day; complete the previous day when
-        the date changes. ``self._just_completed`` holds the completed day for
-        exactly one on_bar call -- signals are evaluated against it once."""
-        self._just_completed = None
-        day = bar.opened_at.date()
-        if self._current is None:
-            self._current = _Day(
-                day=day, open=bar.open, high=bar.high, low=bar.low, close=bar.close
-            )
-            return
-        if day == self._current.day:
-            self._current.absorb(bar)
-            return
-        # Date changed: the previous day is complete. Bars arrive in time
-        # order (the replay sorts; the live builder emits monotonically), so
-        # a date change is always forward.
-        self._just_completed = self._current
-        self._days.append(self._current)
-        del self._days[: -(self._max_window + 1)]
-        self._counts["days_completed"] += 1
-        self._current = _Day(day=day, open=bar.open, high=bar.high, low=bar.low, close=bar.close)
-
-    def _prior_days(self, window: int) -> list[_Day] | None:
-        """The ``window`` days BEFORE the just-completed day, or None during
-        warmup. ``self._days[-1]`` is the completed day itself; the channel a
-        breakout is measured against must not contain the breakout."""
-        if len(self._days) < window + 1:
-            return None
-        return self._days[-(window + 1) : -1]
+        """Aggregate into UTC days. ``_just_completed`` is true for exactly the
+        one on_bar call that completes a day, which is when signals decide."""
+        self._just_completed = self._daily.feed(bar) is not None
+        if self._just_completed:
+            self._counts["days_completed"] += 1
 
     def _atr(self) -> Decimal | None:
-        """Simple average of the true range over the last ``atr_days`` pairs of
-        observed days, the just-completed day included. None during warmup."""
-        n = self._p.atr_days
-        if len(self._days) < n + 1:
-            return None
-        window = self._days[-(n + 1) :]
-        total = Decimal(0)
-        for prev, this in pairwise(window):
-            total += max(
-                this.high - this.low, abs(this.high - prev.close), abs(this.low - prev.close)
-            )
-        return total / n
+        return average_true_range(self._daily.days, self._p.atr_days)
 
     def _breakout_direction(self) -> int:
         """+1/-1 when the just-completed day closed through the entry channel,
         else 0. Callers have already checked a day just completed."""
-        prior = self._prior_days(self._p.entry_channel_days)
-        if prior is None:
+        bounds = channel(self._daily.days, self._p.entry_channel_days)
+        if bounds is None:
             self._counts["days_in_warmup"] += 1
             return 0
-        completed = self._days[-1]
-        if completed.close > max(d.high for d in prior):
+        high, low = bounds
+        close = self._daily.days[-1].close
+        if close > high:
             return 1
-        if completed.close < min(d.low for d in prior):
+        if close < low:
             return -1
         return 0
 
     # -- entries -----------------------------------------------------------
 
     def _maybe_enter(self, bar: Bar) -> Sequence[TradeIntent]:
-        if self._just_completed is None:
+        if not self._just_completed:
             return ()
         direction = self._breakout_direction()
         if direction == 0:
             return ()
         blocked_until = self._no_entry_on_or_before
-        if blocked_until is not None and self._days[-1].day <= blocked_until:
+        if blocked_until is not None and self._daily.days[-1].day <= blocked_until:
             self._counts["entries_suppressed_post_exit"] += 1
             return ()
         atr = self._atr()
@@ -416,7 +363,7 @@ class SolTrendStrategy(BarStrategy):
         self._pending_direction = direction
         side = "long" if direction > 0 else "short"
         self._counts[f"signals_{side}"] += 1
-        completed = self._days[-1]
+        completed = self._daily.days[-1]
         _LOG.info(
             "trend breakout",
             extra={
@@ -440,7 +387,7 @@ class SolTrendStrategy(BarStrategy):
         )
 
     def _count_missed_signal(self) -> None:
-        if self._just_completed is None:
+        if not self._just_completed:
             return
         if self._breakout_direction() != 0:
             self._counts["signals_while_in_trade"] += 1
@@ -473,12 +420,12 @@ class SolTrendStrategy(BarStrategy):
         #    opposite channel. Evaluated before the trail advances off this
         #    bar, because the decision belongs to the completed day, not to
         #    the minute after midnight.
-        if self._just_completed is not None:
-            prior = self._prior_days(self._p.exit_channel_days)
-            if prior is not None:
-                completed = self._days[-1]
-                channel = min(p.low for p in prior) if d > 0 else max(p.high for p in prior)
-                if (completed.close - channel) * d < 0:
+        if self._just_completed:
+            bounds = channel(self._daily.days, self._p.exit_channel_days)
+            if bounds is not None:
+                high, low = bounds
+                level = low if d > 0 else high
+                if (self._daily.days[-1].close - level) * d < 0:
                     return self._exit(trade, bar, "exits_channel")
 
         # 3. Trail follows the peak, never loosens. Active from entry: at
@@ -496,8 +443,9 @@ class SolTrendStrategy(BarStrategy):
         # day-roll edge honest too -- an exit decided on day D's last bar
         # settles on D+1's first bar, the same call that completes day D, and
         # without this a fresh entry could fire off the very day just exited.
-        if self._current is not None:
-            self._no_entry_on_or_before = self._current.day
+        current = self._daily.current_day
+        if current is not None:
+            self._no_entry_on_or_before = current
         trade.exiting = True
         trade.exit_reason = reason.removeprefix("exits_")
         self._counts[reason] += 1

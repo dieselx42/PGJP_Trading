@@ -42,6 +42,13 @@ COMMON=(
 )
 ZEROCOST=(--commission 0 --slippage-ticks 0 --spread-ticks 0)
 
+# Candidate C is the strategy designed against the diagnosed failures: size by
+# risk rather than by decree, refuse entries whose stop does not dwarf the
+# toll, and skip breakouts against the long-term trend. c1 and c2 turn its two
+# opinionated rules OFF one at a time -- if a rule is not earning its place,
+# that pair says so, and the ablation is run every time rather than being
+# something a reader has to request.
+#
 # Candidate A re-derives the ORB's numbers against the $0.373/SOL cost floor:
 # only wide-range days ($3+ opening range), a $6 target (toll 6% instead of
 # 25%), a breakeven lock above the floor, one entry per session.
@@ -56,6 +63,10 @@ RUNS=(
   "a0-big-range-zerocost|Candidate A raw edge|--strategy sol-orb --strategy-params $BIG_RANGE ${ZEROCOST[*]}"
   "b-trend|Candidate B: daily Donchian trend, real costs|--strategy sol-trend --strategy-params position_contracts=40"
   "b0-trend-zerocost|Candidate B raw edge|--strategy sol-trend --strategy-params position_contracts=40 ${ZEROCOST[*]}"
+  "c-momentum|Candidate C: regime-filtered, cost-gated, vol-sized|--strategy sol-momentum --strategy-params position_contracts=40"
+  "c0-momentum-zerocost|Candidate C raw edge|--strategy sol-momentum --strategy-params position_contracts=40 ${ZEROCOST[*]}"
+  "c1-momentum-no-regime|Candidate C with the regime filter OFF|--strategy sol-momentum --strategy-params position_contracts=40,regime_days=0"
+  "c2-momentum-no-costgate|Candidate C with the cost gate OFF|--strategy sol-momentum --strategy-params position_contracts=40,min_stop_cost_multiple=0.001"
 )
 
 echo "writing to $OUT" >&2
