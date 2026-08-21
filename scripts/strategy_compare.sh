@@ -56,9 +56,20 @@ echo "writing to $OUT" >&2
 for row in "${RUNS[@]}"; do
   IFS='|' read -r name desc flags <<<"$row"
   echo "--- $name: $desc" >&2
+  # --sessions is an ORB-only diagnostic (the CLI injects it as a strategy
+  # param, and sol-trend -- a 24/7 daily system -- rightly refuses it), so
+  # strip it from the extras for trend runs instead of failing them.
+  RUN_EXTRA=()
+  skip_next=0
+  for arg in ${EXTRA[@]+"${EXTRA[@]}"}; do
+    if [[ $skip_next -eq 1 ]]; then skip_next=0; continue; fi
+    if [[ "$flags" == *sol-trend* && "$arg" == --sessions ]]; then skip_next=1; continue; fi
+    if [[ "$flags" == *sol-trend* && "$arg" == --sessions=* ]]; then continue; fi
+    RUN_EXTRA+=("$arg")
+  done
   # shellcheck disable=SC2086
   if docker compose exec -T sol-trading-bot python -m app.cli backtest \
-       "${COMMON[@]}" $flags "${EXTRA[@]+"${EXTRA[@]}"}" \
+       "${COMMON[@]}" $flags "${RUN_EXTRA[@]+"${RUN_EXTRA[@]}"}" \
        >"$OUT/$name.json" 2>"$OUT/$name.stderr"; then
     printf '%s\n' "$desc" >"$OUT/$name.desc"
   else

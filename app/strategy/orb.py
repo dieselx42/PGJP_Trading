@@ -202,6 +202,10 @@ def _apply_tunables(p: OrbParams, params: dict[str, Any]) -> OrbParams:
             value = Decimal(str(params[name]))
         except ArithmeticError as exc:
             raise ValueError(f"{name}={params[name]!r} is not a number") from exc
+        if not value.is_finite():
+            # Decimal("nan") parses without raising and then poisons every
+            # comparison; it must fail the same way any other bad value does.
+            raise ValueError(f"{name}={params[name]!r} is not a number")
         if not low < value <= high:
             raise ValueError(f"{name}={value} is outside ({low}, {high}]")
         changes[name] = value

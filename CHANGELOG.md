@@ -187,6 +187,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The backtest fed the replay's **cumulative** realized P&L to the
+  MAX_DAILY_LOSS_USD check, which is a *daily* limit. The first day a losing
+  strategy's running total crossed the limit, every later entry in the replay
+  was silently refused — a year-long result was really a truncated one wearing
+  the year's name. At 40 contracts the ORB baseline crosses $30k months in, so
+  every full-size comparison run was affected. The engine now resets the
+  daily-loss baseline at each UTC midnight, matching the live path's
+  per-trade-date `DailyPerformance` (which was already correct). Pinned by a
+  mutation-verified test: a day-1 breach refuses day-1 entries and day-2
+  entries fill.
+
+- `Decimal("nan")` passed both strategies' tunable validation without raising
+  and then poisoned every later comparison with `InvalidOperation`. Non-finite
+  values are now refused with the same `ValueError` as any other bad input.
+
 - The ORB NY session was pinned to a fixed **14:30 UTC**, which is the 9:30 ET
   equity open only in winter — through the whole DST period (March–November) it
   opened an hour late, at 10:30 ET. The document itself gave the NY open both

@@ -116,7 +116,7 @@ def main(argv: list[str]) -> int:
             for b in buckets:
                 share = b.get("share_of_net")
                 share_txt = "     n/a" if share is None else f"{share * 100:7.1f}%"
-                print(f"  {str(b['bucket']):<22}"
+                print(f"  {b['bucket']!s:<22}"
                       f"n={b['count']:<6}wins={b['wins']:<6}"
                       f"net={_money(b['net']):>12,.0f}"
                       f"  avg={_money(b['avg_net']):>9,.0f}  {share_txt}")

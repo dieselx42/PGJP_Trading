@@ -644,6 +644,7 @@ class TestTunableParams:
             {"stop_distance": "0"},
             {"stop_distance": "-1"},
             {"stop_distance": "narrow"},
+            {"stop_distance": "nan"},
             {"target_distance": "999"},
             {"max_trades_per_session": "0"},
             {"orb_minutes": "0"},

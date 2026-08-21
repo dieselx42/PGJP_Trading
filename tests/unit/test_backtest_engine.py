@@ -40,7 +40,11 @@ from app.config import Config, ConfigError
 from app.contracts.models import QualifiedContract
 from app.enums import Direction, SecurityType, TradingMode
 from app.market_data.models import Quote
-from app.risk.limits import REASON_ORDER_SIZE_EXCEEDED, REASON_POSITION_EXCEEDED
+from app.risk.limits import (
+    REASON_DAILY_LOSS_EXCEEDED,
+    REASON_ORDER_SIZE_EXCEEDED,
+    REASON_POSITION_EXCEEDED,
+)
 from app.safety.gate import REASON_KILL_SWITCH, REASON_TRANSMIT_NOT_ALLOWED
 from app.signals.models import TradeIntent
 from app.signals.validator import REASON_DUPLICATE, REASON_STRATEGY_MISMATCH
@@ -845,3 +849,25 @@ class TestTradeAttribution:
         assert isinstance(attribution, dict)
         buckets = [r["bucket"] for r in attribution["by_exit_reason"]]  # type: ignore[index]
         assert buckets == ["unattributed"]
+
+
+class TestDailyLossIsDaily:
+    def test_the_limit_resets_at_utc_midnight(self) -> None:
+        """MAX_DAILY_LOSS_USD is a DAILY limit. A breach must refuse entries
+        for the rest of THAT day and no further -- passing the replay's
+        cumulative realized P&L (the original bug) silently halted every
+        entry after the first breach, so a year-long result was really a
+        truncated one wearing the year's name.
+
+        Day 1: buy at 300, flatten at 80 -- a ~$5,500 realized loss against
+        the $5,000 limit, so day 1's next entry is refused. Day 2 starts a
+        fresh day: the same strategy's entry must be approved and fill.
+        """
+        day1 = _bars([("300", "300"), ("300", "300"), ("80", "80"), ("80", "80")])
+        day2 = _bars([("80", "80"), ("80", "80")], start=T0 + timedelta(days=1))
+        run = _run(_Alternating(), [*day1, *day2])
+
+        assert REASON_DAILY_LOSS_EXCEEDED in _reasons(run, "risk")
+        day2_date = (T0 + timedelta(days=1)).date().isoformat()
+        day2_fills = [f for f in run.fills if f.filled_at.startswith(day2_date)]
+        assert day2_fills, "the day-2 entry must fill: yesterday's loss is not today's"

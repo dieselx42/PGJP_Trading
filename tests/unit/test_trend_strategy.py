@@ -145,7 +145,7 @@ class TestWarmup:
         assert _feed(strategy, bars) == []
         counters = strategy.describe()["counters"]
         assert counters["days_in_warmup"] > 0  # type: ignore[index]
-        assert counters["entries_long"] == 0  # type: ignore[index]
+        assert counters["signals_long"] == 0  # type: ignore[index]
 
 
 class TestEntries:
@@ -222,9 +222,9 @@ class TestExits:
 
     def test_trail_never_loosens(self) -> None:
         strategy = self._filled_long()
-        _feed(strategy, [_day_bar(4, high="110", low="103", close="109", minute=1)])
+        assert _feed(strategy, [_day_bar(4, high="110", low="103", close="109", minute=1)]) == []
         # A quieter bar with a lower high must not lower the trailed stop.
-        _feed(strategy, [_day_bar(4, high="105", low="102", close="104", minute=2)])
+        assert _feed(strategy, [_day_bar(4, high="105", low="102", close="104", minute=2)]) == []
         intents = _feed(strategy, [_day_bar(4, high="104", low="100.9", close="101", minute=3)])
         assert len(intents) == 1
         assert intents[0].metadata["exit_reason"] == "trail"
@@ -264,15 +264,24 @@ class TestExits:
         assert again[0].requested_position == 0
         assert again[0].metadata["exit_reason"] == "stop"
 
-    def test_after_an_exit_fill_the_book_is_flat_and_reentry_is_possible(self) -> None:
+    def test_reentry_waits_for_the_next_completed_day(self) -> None:
+        """The documented rule: after an exit, the NEXT completed day is the
+        earliest that can signal. Day 4's own close breaking the channel after
+        a day-4 stop-out must NOT re-enter -- that would be two decisions
+        attributed to one day, churning the $9.32 round trip."""
         strategy = self._filled_long()
         _feed(strategy, [_day_bar(4, high="104", low="97.50", close="98", minute=1)])
         strategy.on_fill(side=OrderSide.SELL, quantity=40, price=Decimal("97.40"))
         assert strategy.position == 0
-        # Day 4 closes back above its 3-day channel -> a fresh signal fires
-        # when day 5's first bar completes it.
+        # Day 4 closes back above its 3-day channel; the signal off day 4 is
+        # suppressed because the exit was decided on day 4.
         _feed(strategy, [_day_bar(4, high="107", low="97", close="106", minute=3)])
-        intents = _feed(strategy, [_day_bar(5, high="106", low="105", close="105.5")])
+        assert _feed(strategy, [_day_bar(5, high="106", low="105", close="105.5")]) == []
+        assert strategy.describe()["counters"]["entries_suppressed_post_exit"] == 1  # type: ignore[index]
+        # Day 5 closes above ITS channel (which now holds day 4's 107 high):
+        # the first day completed after the exit, so this one signals.
+        _feed(strategy, [_day_bar(5, high="108.5", low="105", close="108", minute=2)])
+        intents = _feed(strategy, [_day_bar(6, high="108", low="107", close="107.5")])
         assert len(intents) == 1
         assert intents[0].direction is Direction.LONG
 
@@ -315,7 +324,7 @@ class TestParams:
         with pytest.raises(ValueError):
             SolTrendStrategy(params={"entry_channel_days": bad})
 
-    @pytest.mark.parametrize("bad", ["0", "-2", "21", "x"])
+    @pytest.mark.parametrize("bad", ["0", "-2", "21", "x", "nan"])
     def test_invalid_multiples_are_refused(self, bad: str) -> None:
         with pytest.raises(ValueError):
             SolTrendStrategy(params={"stop_atr_mult": bad})
@@ -329,9 +338,77 @@ class TestParams:
         with pytest.raises(ValueError, match="position_contracts"):
             SolTrendStrategy(params={"position_contracts": 0})
 
+    def test_a_trail_tighter_than_the_stop_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="trail_atr_mult"):
+            SolTrendStrategy(params={"stop_atr_mult": "3", "trail_atr_mult": "2"})
+
+    def test_an_exit_window_longer_than_the_entry_window_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="exit_channel_days"):
+            SolTrendStrategy(params={"entry_channel_days": 5, "exit_channel_days": 6})
+
     def test_describe_echoes_the_effective_rule_set(self) -> None:
         described = SolTrendStrategy(params={"stop_atr_mult": "2.5", **PARAMS}).describe()
         effective = described["params_effective"]
         assert effective["stop_atr_mult"] == "2.5"  # type: ignore[index]
         assert effective["entry_channel_days"] == "3"  # type: ignore[index]
         assert effective["atr_days"] == "3"  # type: ignore[index]
+
+
+class TestStrictness:
+    """The channel comparisons are strict; an equality mutation must fail here."""
+
+    def test_a_close_exactly_at_the_channel_is_no_signal(self) -> None:
+        strategy = _strategy()
+        bars = [*_warmup_days(), _day_bar(3, high="102", low="100", close="101"), _day_bar(4)]
+        assert _feed(strategy, bars) == []
+
+    def test_a_close_exactly_at_the_exit_channel_is_no_exit(self) -> None:
+        strategy = _strategy()
+        _long_entry(strategy)
+        strategy.on_fill(side=OrderSide.BUY, quantity=40, price=Decimal("103.50"))
+        _feed(strategy, [_day_bar(4, high="104", low="103", close="103.5", minute=1)])
+        _feed(strategy, [_day_bar(5, high="104", low="103", close="103.5")])
+        # Day 6 closes AT the 2-day channel low (103), not through it.
+        _feed(strategy, [_day_bar(6, high="103.5", low="103", close="103")])
+        assert _feed(strategy, [_day_bar(7, high="103.5", low="103", close="103.2")]) == []
+
+
+class TestIntraBarPessimism:
+    def test_the_stop_uses_the_previous_bars_level_not_this_bars_trail(self) -> None:
+        """One bar both runs to new highs and dips to where the trail WOULD sit
+        if it advanced off this same bar. The stop check must see the old
+        level: advancing the trail first would manufacture an exit from a
+        peak that had not been banked when the dip happened."""
+        strategy = _strategy()
+        _long_entry(strategy)
+        strategy.on_fill(side=OrderSide.BUY, quantity=40, price=Decimal("103.50"))
+        # High 110 implies a 101 trail -- but only from NEXT bar on. This
+        # bar's low of 101 must not trip it (old stop is 97.50).
+        assert _feed(strategy, [_day_bar(4, high="110", low="101", close="109", minute=1)]) == []
+        # Now the 101 trail is armed; the same low exits.
+        intents = _feed(strategy, [_day_bar(4, high="109", low="101", close="102", minute=2)])
+        assert len(intents) == 1
+        assert intents[0].metadata["exit_reason"] == "trail"
+
+
+class TestFillSafetyNets:
+    def test_an_unsignalled_fill_gets_an_emergency_stop_at_entry(self) -> None:
+        """A fill the strategy never asked for (no stashed ATR, no history to
+        compute one) must not crash and must not be held unmanaged: the stop
+        lands at the entry, so the next bar closes it."""
+        strategy = _strategy()
+        strategy.on_fill(side=OrderSide.BUY, quantity=40, price=Decimal("100"))
+        assert strategy.position == 40
+        intents = _feed(strategy, [_day_bar(0, high="101", low="99", close="100")])
+        assert len(intents) == 1
+        assert intents[0].requested_position == 0
+
+    def test_a_fill_opposite_to_the_signal_is_managed_not_crashed(self) -> None:
+        strategy = _strategy()
+        _long_entry(strategy)
+        strategy.on_fill(side=OrderSide.SELL, quantity=40, price=Decimal("103.50"))
+        assert strategy.position == -40
+        # Managed as the short it actually is: an adverse move up stops it.
+        intents = _feed(strategy, [_day_bar(4, high="110", low="103", close="109", minute=1)])
+        assert len(intents) == 1
+        assert intents[0].requested_position == 0

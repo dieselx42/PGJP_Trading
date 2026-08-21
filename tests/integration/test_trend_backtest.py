@@ -161,7 +161,7 @@ class TestTrendThroughTheCommand:
         assert "trail" in by_exit
 
         counters = report["strategy"]["counters"]
-        assert counters["entries_long"] == 1
+        assert counters["signals_long"] == 1
         assert counters["exits_trail"] == 1
         assert counters["exits_stop"] == 0
         assert counters["days_completed"] == 24

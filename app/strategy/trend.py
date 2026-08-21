@@ -124,6 +124,10 @@ def _apply_tunables(p: TrendParams, params: dict[str, Any]) -> TrendParams:
             value = Decimal(str(params[name]))
         except ArithmeticError as exc:
             raise ValueError(f"{name}={params[name]!r} is not a number") from exc
+        if not value.is_finite():
+            # Decimal("nan") parses without raising and then poisons every
+            # comparison; it must fail the same way any other bad value does.
+            raise ValueError(f"{name}={params[name]!r} is not a number")
         if not low < value <= high:
             raise ValueError(f"{name}={value} is outside ({low}, {high}]")
         changes[name] = value
@@ -206,6 +210,21 @@ class SolTrendStrategy(BarStrategy):
             self._p = replace(self._p, position_contracts=size)
         self._p = _apply_tunables(self._p, params or {})
         _reject_unknown_params(params or {})
+        if self._p.trail_atr_mult < self._p.stop_atr_mult:
+            # A trail tighter than the initial stop would govern from the first
+            # bar, making every exit report as "trail" and the initial stop
+            # unreachable -- an inversion no experiment should express silently.
+            raise ValueError(
+                f"trail_atr_mult={self._p.trail_atr_mult} must be >= "
+                f"stop_atr_mult={self._p.stop_atr_mult}"
+            )
+        if self._p.exit_channel_days > self._p.entry_channel_days:
+            # The exit channel would then spend stretches of the replay unable
+            # to fire (not enough prior days), silently -- refuse instead.
+            raise ValueError(
+                f"exit_channel_days={self._p.exit_channel_days} must be <= "
+                f"entry_channel_days={self._p.entry_channel_days}"
+            )
 
         #: Completed days, oldest first, trimmed to the longest window + 1.
         self._days: list[_Day] = []
@@ -216,11 +235,13 @@ class SolTrendStrategy(BarStrategy):
         self._pending_entry = False
         self._pending_atr: Decimal | None = None
         self._pending_direction = 0
+        self._no_entry_on_or_before: date | None = None
         self._counts: dict[str, int] = {
             "days_completed": 0,
             "days_in_warmup": 0,
-            "entries_long": 0,
-            "entries_short": 0,
+            "signals_long": 0,
+            "signals_short": 0,
+            "entries_suppressed_post_exit": 0,
             "signals_while_in_trade": 0,
             "entries_cancelled_unfilled": 0,
             "exits_stop": 0,
@@ -247,11 +268,31 @@ class SolTrendStrategy(BarStrategy):
 
         if previous == 0 and self._position != 0:
             direction = 1 if self._position > 0 else -1
-            # The ATR was stashed when the signal fired; a fill without one is
-            # a fill this strategy never asked for, and trading on a level
-            # computed from nothing is worse than stopping.
-            atr = self._pending_atr
-            assert atr is not None, "entry fill arrived with no signal-day ATR stashed"
+            if self._pending_direction and direction != self._pending_direction:
+                # The book says we filled opposite to the signal we emitted.
+                # Manage what we actually hold, but say so loudly -- this is
+                # a routing fault, not a market outcome.
+                _LOG.error(
+                    "entry fill direction contradicts the signal",
+                    extra={
+                        "event": "trend.fill_direction_mismatch",
+                        "signalled": self._pending_direction,
+                        "filled": direction,
+                    },
+                )
+            # The ATR stashed when the signal fired. Live, a slow fill can
+            # land after the next bar already cleared the pending state; fall
+            # back to the current ATR rather than crashing mid-position. If
+            # neither exists this is a fill the strategy never asked for: the
+            # stop goes AT the entry, which exits on the next bar -- an
+            # unmanaged position is the one state never worth holding.
+            atr = self._pending_atr if self._pending_atr is not None else self._atr()
+            if atr is None:
+                _LOG.error(
+                    "entry fill with no ATR context; emergency stop at entry",
+                    extra={"event": "trend.fill_without_atr", "price": str(price)},
+                )
+                atr = Decimal(0)
             stop = price - self._p.stop_atr_mult * atr * direction
             self._trade = _Trade(
                 direction=direction,
@@ -359,6 +400,10 @@ class SolTrendStrategy(BarStrategy):
         direction = self._breakout_direction()
         if direction == 0:
             return ()
+        blocked_until = self._no_entry_on_or_before
+        if blocked_until is not None and self._days[-1].day <= blocked_until:
+            self._counts["entries_suppressed_post_exit"] += 1
+            return ()
         atr = self._atr()
         if atr is None or atr == 0:
             # A channel long enough to break out of but not enough days for an
@@ -370,7 +415,7 @@ class SolTrendStrategy(BarStrategy):
         self._pending_atr = atr
         self._pending_direction = direction
         side = "long" if direction > 0 else "short"
-        self._counts[f"entries_{side}"] += 1
+        self._counts[f"signals_{side}"] += 1
         completed = self._days[-1]
         _LOG.info(
             "trend breakout",
@@ -446,6 +491,13 @@ class SolTrendStrategy(BarStrategy):
         return ()
 
     def _exit(self, trade: _Trade, bar: Bar, reason: str) -> Sequence[TradeIntent]:
+        # The documented rule: after an exit, the NEXT completed day is the
+        # earliest that can signal again. Recording the decision day makes the
+        # day-roll edge honest too -- an exit decided on day D's last bar
+        # settles on D+1's first bar, the same call that completes day D, and
+        # without this a fresh entry could fire off the very day just exited.
+        if self._current is not None:
+            self._no_entry_on_or_before = self._current.day
         trade.exiting = True
         trade.exit_reason = reason.removeprefix("exits_")
         self._counts[reason] += 1

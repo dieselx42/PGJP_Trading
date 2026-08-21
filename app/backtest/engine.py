@@ -68,7 +68,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from app.backtest.broker import BacktestBroker, FillModel, SimulatedFill
@@ -434,7 +434,19 @@ class BacktestEngine:
         # there means nothing traded that minute.
         volume_reported = reports_volume(bars)
 
+        # MAX_DAILY_LOSS_USD is a DAILY limit, so the figure handed to the
+        # risk manager must reset at each UTC midnight, exactly as the live
+        # path's per-trade-date DailyPerformance does. Passing the replay's
+        # cumulative realized P&L instead -- the original bug -- meant the
+        # first day the running total crossed the limit silently halted every
+        # later entry, and a year-long result was really a truncated one.
+        current_day: date | None = None
+        day_start_realized = Decimal(0)
+
         for bar in bars:
+            if bar.opened_at.date() != current_day:
+                current_day = bar.opened_at.date()
+                day_start_realized = book.realized_pnl
             has_liquidity = bar.had_trades or not volume_reported
             if not has_liquidity:
                 empty_bars += 1
@@ -465,7 +477,13 @@ class BacktestEngine:
                 else self.strategy.handle_quote(self._quote(bar))
             )
             for intent in intents:
-                refusal = self._handle(intent, bar=bar, book=book, orders=orders_this_hour)
+                refusal = self._handle(
+                    intent,
+                    bar=bar,
+                    book=book,
+                    orders=orders_this_hour,
+                    daily_pnl=book.realized_pnl - day_start_realized,
+                )
                 if refusal is not None:
                     refusals.append(refusal)
 
@@ -524,6 +542,7 @@ class BacktestEngine:
         bar: Bar,
         book: _Book,
         orders: list[datetime],
+        daily_pnl: Decimal,
     ) -> Refusal | None:
         at = bar.opened_at.isoformat()
 
@@ -560,7 +579,7 @@ class BacktestEngine:
             contract=self.contract,
             reference_price=bar.close,
             market_data_age_seconds=0.0,
-            daily_pnl=book.realized_pnl,
+            daily_pnl=daily_pnl,
             open_orders_count=self.broker.pending_count,
             orders_last_hour=len(recent),
             # Conditions a replay asserts rather than observes. They are the
