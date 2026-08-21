@@ -46,9 +46,18 @@ the problem.
 `scripts/strategy_compare.sh` runs baseline + both candidates ± costs in one
 pass on the VPS.
 
-**Open items:** run `scripts/strategy_compare.sh` on the VPS and paste the
-digest; ask the document's author the five questions; roll MSLQ6 before
-Aug 28 (no auto-rollover — manual `ibkr-checkout --contract-month`).
+**Comparison verdict (2026-08-21, correct 9:30 ET clock, 40 ct, 1yr spot):**
+- ORB verbatim: net −$92,984 (gross −$530, costs $92,454, n=248). Dead; raw
+  edge zero at either clock. Stops −$94.6k/97 trades, breakeven bleed −$22.4k.
+- Big-range ORB (A): 1 trade/yr — $3 range filter too tight, no verdict.
+- Trend (B): net −$11,354 (gross −$6,240, n=12). Costs work as designed
+  ($373/trade ≈ 4% of move) but entries lost; n too small to judge.
+
+**Open items:** import 2021→2025 SOL history and re-run `strategy_compare.sh`
+(n≈60 settles candidate B); ask the document's author the five questions
+(only Q2 resting-stop fills could still rescue its table); roll MSLQ6 before
+Aug 28 (no auto-rollover — `ibkr-checkout --contract-month 202609`, update
+DEFAULT_CONTRACT_MONTH, restart); decide whether to stay armed meanwhile.
 
 **Note:** `backtest` needs `bars` + `contract_metadata` from the VPS
 database. It cannot run in an ephemeral Claude container — don't try.
