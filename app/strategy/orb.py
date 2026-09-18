@@ -62,6 +62,20 @@ from polled quotes -- the range measures slightly narrow and the trail's peak
 slightly low relative to exchange bars; see that module. Size can be
 overridden DOWN (never up) via ``STRATEGY_POSITION_CONTRACTS``, so first paper
 trades run at 1 contract before anything runs at the document's 40.
+
+What is configurable, and where
+-------------------------------
+Every number above is a REPLAY override (``backtest --strategy-params``), not
+a live setting: the running bot passes only ``position_contracts``. That is
+deliberate -- changing when or how a deployed strategy trades is a
+specification change, not a configuration knob -- but it does mean a rule set
+proven in a replay cannot be armed without a code change.
+
+Two of the rules are switches rather than numbers, because zero is not a legal
+distance: ``breakeven_enabled`` and ``trail_enabled``. Turning both off leaves
+a plain bracket -- one stop, one target, neither ever moving -- which is the
+only shape the tunables could not previously express. Both default ON, since
+the document specifies them.
 """
 
 from __future__ import annotations
@@ -163,6 +177,19 @@ class OrbParams:
     trail_trigger: Decimal = Decimal("0.65")
     trail_width: Decimal = Decimal("0.40")
 
+    #: The document's two stop-management upgrades, each switchable OFF.
+    #: They default ON because that is what the document specifies, but a
+    #: plain bracket -- one stop, one target, neither ever moving -- is a
+    #: configuration the numbers can no longer express otherwise: every
+    #: distance tunable has an EXCLUSIVE lower bound of zero, so "never
+    #: trigger" had to be faked with an unreachably large trigger. Faking it
+    #: is how a replay ends up reporting a rule it did not actually run.
+    #: Switching break-even off also removes the rule that produced 64
+    #: arithmetically-guaranteed losses (it locks $0.05 against a cost floor
+    #: several times that); see docs/STRATEGY_ANALYSIS.md.
+    breakeven_enabled: bool = True
+    trail_enabled: bool = True
+
 
 #: The document's numeric rules, each overridable in a REPLAY to answer "what
 #: if this number were different". Decimal fields are per-SOL dollars.
@@ -177,6 +204,9 @@ _TUNABLE_DECIMALS: dict[str, tuple[Decimal, Decimal]] = {
     "trail_width": (Decimal("0"), Decimal("20")),
     "min_orb_range": (Decimal("0"), Decimal("20")),
 }
+#: Rules that are switched rather than sized. A distance of zero is not a
+#: legal value for any of the tunables above, so "off" needs its own knob.
+_TUNABLE_BOOLS: frozenset[str] = frozenset({"breakeven_enabled", "trail_enabled"})
 _TUNABLE_INTS: dict[str, tuple[int, int]] = {
     "entry_window_minutes": (1, 600),
     "max_trades_per_session": (1, 10),
@@ -219,24 +249,55 @@ def _apply_tunables(p: OrbParams, params: dict[str, Any]) -> OrbParams:
         if not int_low <= parsed <= int_high:
             raise ValueError(f"{name}={parsed} is outside [{int_low}, {int_high}]")
         changes[name] = parsed
+    for name in _TUNABLE_BOOLS:
+        if name not in params:
+            continue
+        changes[name] = _parse_bool(name, params[name])
     return replace(p, **changes) if changes else p  # type: ignore[arg-type]
 
 
+#: Spellings accepted for a boolean override. The CLI hands every value over
+#: as a string, so ``trail_enabled=false`` must not arrive as the truthy
+#: ``"false"`` -- a switch that silently ignores the operator's "off" is the
+#: same class of bug as the typo'd parameter name ``_reject_unknown_params``
+#: exists to catch.
+_TRUE = frozenset({"1", "true", "t", "yes", "y", "on"})
+_FALSE = frozenset({"0", "false", "f", "no", "n", "off"})
+
+
+def _parse_bool(name: str, raw: object) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise ValueError(f"{name}={raw!r} is not a boolean; use one of {sorted(_TRUE | _FALSE)}")
+
+
 def _reject_unknown_params(params: dict[str, Any]) -> None:
-    known = _HANDLED_ELSEWHERE | set(_TUNABLE_DECIMALS) | set(_TUNABLE_INTS)
+    known = _HANDLED_ELSEWHERE | set(_TUNABLE_DECIMALS) | set(_TUNABLE_INTS) | _TUNABLE_BOOLS
     unknown = set(params) - known
     if unknown:
         raise ValueError(f"unknown strategy parameter(s) {sorted(unknown)}; known: {sorted(known)}")
 
 
 def _parse_session_opens(raw: object) -> tuple[SessionOpen, ...]:
-    """Parse ``"HH:MM"`` strings into session opens, refusing to guess.
+    """Parse ``"HH:MM"`` or ``"HH:MM@Zone"`` strings into session opens.
 
-    Accepts a list/tuple of strings or one comma-separated string. These are
-    UTC by definition -- the ``--sessions`` override is a diagnostic knob for
-    replaying fixed-UTC hours (e.g. testing 13:30 vs 14:30), so it stays on the
-    clock every other override in this system uses. The DST-tracking Eastern
-    anchor is the DEFAULT NY session, not something this override expresses.
+    Accepts a list/tuple of strings or one comma-separated string. A bare
+    ``HH:MM`` is UTC, which is what the ``--sessions`` diagnostic was built
+    for: replaying the fixed-UTC hours the document contradicts itself about
+    (13:30 vs 14:30). Appending ``@`` and an IANA zone anchors the session to
+    that zone's wall clock instead, so ``09:30@America/New_York`` is the real
+    NY open in both seasons.
+
+    The zone suffix exists so that SELECTING a subset of sessions does not
+    silently change their clock. Restricting a run to NY alone used to mean
+    writing ``--sessions 13:30``, which is 9:30 Eastern only during DST and an
+    hour early every winter -- the override would have quietly reintroduced
+    the exact bug the Eastern anchor was added to fix.
     """
     if isinstance(raw, str):
         parts: list[object] = [p.strip() for p in raw.split(",") if p.strip()]
@@ -249,18 +310,26 @@ def _parse_session_opens(raw: object) -> tuple[SessionOpen, ...]:
     opens: list[SessionOpen] = []
     for part in parts:
         text = str(part).strip()
+        clock, _, zone = text.partition("@")
+        zone = zone.strip() or "UTC"
         try:
-            hour, minute = text.split(":")
+            hour, minute = clock.strip().split(":")
             # time() validates the ranges (0<=h<24, 0<=m<60) that a bare
             # SessionOpen would accept blindly; a "25:00" must still be refused.
             validated = time(int(hour), int(minute))
-            opens.append(SessionOpen(validated.hour, validated.minute, "UTC"))
         except (ValueError, TypeError) as exc:
-            raise ValueError(f"session open {text!r} is not a valid HH:MM time") from exc
-    keys = [(o.hour, o.minute) for o in opens]
+            raise ValueError(f"session open {text!r} is not a valid HH:MM[@Zone] time") from exc
+        try:
+            # Resolved now, not at the first bar: an unknown zone must fail at
+            # startup, not hours into a replay or -- far worse -- live.
+            _zone(zone)
+        except Exception as exc:
+            raise ValueError(f"session open {text!r} names unknown time zone {zone!r}") from exc
+        opens.append(SessionOpen(validated.hour, validated.minute, zone))
+    keys = [(o.hour, o.minute, o.zone) for o in opens]
     if len(set(keys)) != len(keys):
         raise ValueError(f"session_opens contains duplicates: {sorted(o.label for o in opens)}")
-    return tuple(sorted(opens, key=lambda o: (o.hour, o.minute)))
+    return tuple(sorted(opens, key=lambda o: (o.hour, o.minute, o.zone)))
 
 
 @dataclass
@@ -550,13 +619,15 @@ class SolOrbStrategy(BarStrategy):
         if trade.target is not None and gain >= self._p.target_distance:
             return self._exit(trade, bar, "exits_target")
 
-        # 3. Trail activation: cancel the target, follow the peak.
-        if not trade.trailing and gain >= self._p.trail_trigger:
+        # 3. Trail activation: cancel the target, follow the peak. Switched
+        #    off entirely, the target is never cancelled and the trade runs to
+        #    one of the two bracket levels.
+        if self._p.trail_enabled and not trade.trailing and gain >= self._p.trail_trigger:
             trade.trailing = True
             trade.target = None
 
         # 4. Break-even lock.
-        if gain >= self._p.breakeven_trigger:
+        if self._p.breakeven_enabled and gain >= self._p.breakeven_trigger:
             locked = trade.entry + self._p.breakeven_lock * d
             trade.stop = max(trade.stop, locked) if d > 0 else min(trade.stop, locked)
 
@@ -629,7 +700,8 @@ class SolOrbStrategy(BarStrategy):
             # The full effective rule set, so an experiment's result records
             # exactly what ran and two runs can never be confused.
             "params_effective": {
-                name: str(getattr(self._p, name)) for name in (*_TUNABLE_DECIMALS, *_TUNABLE_INTS)
+                name: str(getattr(self._p, name))
+                for name in (*_TUNABLE_DECIMALS, *_TUNABLE_INTS, *sorted(_TUNABLE_BOOLS))
             },
             "counters": dict(self._counts),
             "note": (

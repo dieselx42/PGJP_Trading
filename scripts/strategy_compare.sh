@@ -17,7 +17,7 @@
 # affect the running bot. Safe to run while the live process is armed.
 #
 # Usage:
-#   scripts/strategy_compare.sh                     # all six runs
+#   scripts/strategy_compare.sh                     # every run
 #   scripts/strategy_compare.sh --out /tmp/compare  # choose output dir
 #   scripts/strategy_compare.sh -- --start 2025-08-01 --end 2026-08-01
 #                                                   # extra flags -> every run
@@ -54,6 +54,27 @@ ZEROCOST=(--commission 0 --slippage-ticks 0 --spread-ticks 0)
 # 25%), a breakeven lock above the floor, one entry per session.
 BIG_RANGE="position_contracts=40,min_orb_range=3.00,stop_distance=2.00,target_distance=6.00,breakeven_trigger=2.00,breakeven_lock=0.50,trail_trigger=3.00,trail_width=1.50,max_trades_per_session=1"
 
+# Candidate D is the operator's specification: the document's ORB trigger
+# unchanged, but NY only, one entry per day, and a PLAIN bracket -- a $1 stop
+# and a $2 target, neither of which ever moves. It keeps the one ORB exit rule
+# that worked in attribution (the target, 7/7 wins) and removes the two that
+# did not: the break-even lock, whose $0.05 sits below the cost floor and so
+# lost on all 64 of its exits, and the trail, which cancels the target before
+# it can be reached.
+#
+# The 2:1 reward-to-risk is what makes it worth measuring. At 1 contract a $2
+# win is +$50 gross and a $1 loss -$25, against ~$13 of round-trip cost: it
+# needs a 50.8% win rate to break even, where a costless 2:1 needs 33.3%. The
+# zero-cost twin says which of those two numbers the entry is actually near --
+# and the ORB trigger measured 49.8% before, so this is a genuine test of
+# whether the exit geometry alone can rescue it.
+#
+# The session is spelled with its zone on purpose. "--sessions 13:30" is 9:30
+# Eastern only during DST, so running NY alone on a UTC clock would put it an
+# hour early every winter.
+BRACKET="position_contracts=40,stop_distance=1.00,target_distance=2.00,max_trades_per_session=1,breakeven_enabled=false,trail_enabled=false"
+NY_ONLY="--sessions 09:30@America/New_York"
+
 # name|description|strategy flags
 RUNS=(
   "z-hold-benchmark|BENCHMARK: passive long, rolled quarterly|--strategy sol-hold --strategy-params position_contracts=40"
@@ -67,6 +88,9 @@ RUNS=(
   "c0-momentum-zerocost|Candidate C raw edge|--strategy sol-momentum --strategy-params position_contracts=40 ${ZEROCOST[*]}"
   "c1-momentum-no-regime|Candidate C with the regime filter OFF|--strategy sol-momentum --strategy-params position_contracts=40,regime_days=0"
   "c2-momentum-no-costgate|Candidate C with the cost gate OFF|--strategy sol-momentum --strategy-params position_contracts=40,min_stop_cost_multiple=0.001"
+  "d-bracket|Candidate D: NY only, 1/day, plain \$1/\$2 bracket|--strategy sol-orb $NY_ONLY --strategy-params $BRACKET"
+  "d0-bracket-zerocost|Candidate D raw edge|--strategy sol-orb $NY_ONLY --strategy-params $BRACKET ${ZEROCOST[*]}"
+  "d1-bracket-both-sessions|Candidate D with London back on|--strategy sol-orb --strategy-params $BRACKET"
 )
 
 echo "writing to $OUT" >&2

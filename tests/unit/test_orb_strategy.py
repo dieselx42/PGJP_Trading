@@ -718,3 +718,118 @@ class TestIntentMetadata:
         )
         assert again.requested_position == 0
         assert again.metadata["exit_reason"] == "breakeven"
+
+
+class TestPlainBracket:
+    """The document's two stop upgrades, switched off.
+
+    A one-stop/one-target bracket could not be expressed before: every
+    distance tunable has an EXCLUSIVE lower bound of zero, so "never trigger"
+    had to be faked with an unreachably large number. These switches make it
+    a stated configuration instead of a trick, which matters because a replay
+    is only worth reading if it ran the rules it claims to have run.
+    """
+
+    def test_the_breakeven_lock_never_moves_the_stop_when_switched_off(self) -> None:
+        strategy = SolOrbStrategy(params={"breakeven_enabled": "false"})
+        next_at = _entered_long(strategy, fill_price="100.00")
+        # +$0.45 is past the $0.40 trigger. With the rule on, the stop would
+        # move to 100.05 and the pullback below would exit; with it off, the
+        # stop stays at the entry-less-$0.65 bracket level and nothing fires.
+        _feed(strategy, [_bar(next_at, high="100.45", close="100.40")])
+        assert (
+            _feed(strategy, [_bar(next_at + timedelta(minutes=1), low="100.00", close="100.02")])
+            == []
+        )
+
+    def test_the_trail_never_cancels_the_target_when_switched_off(self) -> None:
+        strategy = SolOrbStrategy(
+            params={
+                "stop_distance": "1.00",
+                "target_distance": "2.00",
+                "breakeven_enabled": "false",
+                "trail_enabled": "false",
+            }
+        )
+        next_at = _entered_long(strategy, fill_price="100.00")
+        # Past the $0.65 trail trigger. With the trail on, the target is
+        # cancelled here and a $0.40 giveback would end the trade around
+        # $101.10; with it off, the $2.00 target survives to be hit.
+        assert _feed(strategy, [_bar(next_at, high="101.50", close="101.40")]) == []
+        [exit_intent] = _feed(
+            strategy, [_bar(next_at + timedelta(minutes=1), high="102.00", close="101.95")]
+        )
+        assert exit_intent.requested_position == 0
+        assert exit_intent.metadata["exit_reason"] == "target"
+
+    def test_the_switches_default_to_the_documents_rules(self) -> None:
+        """Off is opt-in. The default must remain the document, verbatim."""
+        effective = SolOrbStrategy().describe()["params_effective"]
+        assert effective["breakeven_enabled"] == "True"
+        assert effective["trail_enabled"] == "True"
+
+    def test_a_replay_records_the_switches_it_ran(self) -> None:
+        strategy = SolOrbStrategy(params={"trail_enabled": "no"})
+        effective = strategy.describe()["params_effective"]
+        assert effective["trail_enabled"] == "False"
+        assert effective["breakeven_enabled"] == "True"
+
+    @pytest.mark.parametrize("raw", ["false", "FALSE", "off", "0", "no", "n"])
+    def test_every_spelling_of_off_is_understood(self, raw: str) -> None:
+        """The CLI hands values over as strings.
+
+        A switch that took ``"false"`` for its truthiness would silently run
+        the rule the operator just turned off, and the replay would report a
+        strategy nobody configured.
+        """
+        strategy = SolOrbStrategy(params={"trail_enabled": raw})
+        assert strategy.describe()["params_effective"]["trail_enabled"] == "False"
+
+    def test_a_value_that_is_neither_true_nor_false_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="trail_enabled"):
+            SolOrbStrategy(params={"trail_enabled": "maybe"})
+
+
+class TestSessionZoneOverride:
+    """Selecting one session must not silently move its clock."""
+
+    def test_a_bare_time_is_still_utc(self) -> None:
+        strategy = SolOrbStrategy(params={"session_opens": "13:30"})
+        assert [s["anchor"] for s in strategy.describe()["sessions"]] == ["13:30 UTC"]
+
+    def test_a_zone_suffix_anchors_to_that_zones_wall_clock(self) -> None:
+        """The whole point: NY alone, without reintroducing the DST bug.
+
+        ``--sessions 13:30`` is 9:30 Eastern only during DST. Running one
+        session had no other spelling before, so restricting a replay to NY
+        would have quietly put it an hour early every winter -- exactly the
+        bug the Eastern anchor was added to fix.
+        """
+        strategy = SolOrbStrategy(params={"session_opens": "09:30@America/New_York"})
+        [session] = strategy.describe()["sessions"]
+        assert session["anchor"] == "09:30 America/New_York"
+
+    def test_the_ny_only_override_tracks_dst(self) -> None:
+        from app.strategy.orb import _parse_session_opens
+
+        [ny] = _parse_session_opens("09:30@America/New_York")
+        summer = ny.nominal_utc(datetime(2026, 7, 1, 12, 0, tzinfo=UTC))
+        winter = ny.nominal_utc(datetime(2026, 1, 5, 12, 0, tzinfo=UTC))
+        assert (summer.hour, summer.minute) == (13, 30)
+        assert (winter.hour, winter.minute) == (14, 30)
+
+    def test_zoned_and_utc_sessions_coexist(self) -> None:
+        strategy = SolOrbStrategy(params={"session_opens": "08:00,09:30@America/New_York"})
+        assert [s["anchor"] for s in strategy.describe()["sessions"]] == [
+            "08:00 UTC",
+            "09:30 America/New_York",
+        ]
+
+    def test_an_unknown_zone_is_refused_at_construction(self) -> None:
+        """Loud at startup, not hours into a replay -- or live."""
+        with pytest.raises(ValueError, match="unknown time zone"):
+            SolOrbStrategy(params={"session_opens": "09:30@Mars/Olympus_Mons"})
+
+    def test_an_out_of_range_hour_is_still_refused_with_a_zone(self) -> None:
+        with pytest.raises(ValueError, match="not a valid"):
+            SolOrbStrategy(params={"session_opens": "25:00@America/New_York"})

@@ -1130,21 +1130,27 @@ def build_parser() -> argparse.ArgumentParser:
                 default=None,
                 metavar="k=v[,k=v]",
                 help=(
-                    "override the strategy's numeric rules for THIS replay only, e.g. "
-                    "'stop_distance=1.00,max_trades_per_session=1'. The strategy "
-                    "validates every key and refuses unknowns. The live runtime has no "
-                    "such override: experiments live in the replay."
+                    "override the strategy's rules for THIS replay only, e.g. "
+                    "'stop_distance=1.00,max_trades_per_session=1'. Distances are "
+                    "per-SOL dollars; breakeven_enabled and trail_enabled are booleans "
+                    "that switch the ORB's two stop upgrades off for a plain bracket. "
+                    "The strategy validates every key and refuses unknowns. The live "
+                    "runtime has no such override: experiments live in the replay."
                 ),
             )
             sub.add_argument(
                 "--sessions",
                 default=None,
-                metavar="HH:MM[,HH:MM]",
+                metavar="HH:MM[@Zone][,...]",
                 help=(
-                    "override the strategy's session opens (UTC) for THIS replay only. "
-                    "A diagnostic: the ORB document says both '14:30 UTC' and '9:30 ET' "
-                    "for the NY open, an hour apart during US DST -- replay both and "
-                    "let the data answer. The live runtime has no such override."
+                    "override the strategy's session opens for THIS replay only. A bare "
+                    "HH:MM is UTC; append '@' and an IANA zone to anchor to that zone's "
+                    "wall clock, e.g. '09:30@America/New_York' for NY alone in both "
+                    "seasons. A diagnostic: the ORB document says both '14:30 UTC' and "
+                    "'9:30 ET' for the NY open, an hour apart during US DST -- replay "
+                    "both and let the data answer. Also the way to run ONE session: "
+                    "'--sessions 09:30@America/New_York' drops London without moving "
+                    "NY's clock. The live runtime has no such override."
                 ),
             )
             sub.add_argument(

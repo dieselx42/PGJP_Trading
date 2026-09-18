@@ -53,6 +53,20 @@ pass on the VPS.
 - Trend (B): net −$11,354 (gross −$6,240, n=12). Costs work as designed
   ($373/trade ≈ 4% of move) but entries lost; n too small to judge.
 
+**Candidate D — operator spec (2026-09-18).** NY only, 1 entry/day, plain
+$1 stop / $2 target, no breakeven, no trail. Needed two new knobs, both added:
+`breakeven_enabled` / `trail_enabled` (zero is not a legal distance, so "off"
+needed its own switch), and a `HH:MM@Zone` suffix on `--sessions` so running
+NY alone doesn't fall back to a fixed-UTC clock an hour early each winter.
+Runs as `d-bracket` / `d0-bracket-zerocost` / `d1-bracket-both-sessions` in
+`strategy_compare.sh`. Not yet measured. At 1 ct it needs a **50.8%** win rate
+(+$50 win, −$25 loss, ~$13 costs) vs 33.3% costless — and this same entry
+measured 49.8% with costs removed, so `d0` is the row that decides it.
+
+**Live vs replay.** `app/main.py:188` passes only `position_contracts` to the
+strategy. Every other rule is replay-only. Arming any of this needs new fields
+in `app/config.py` plus the passthrough in `main.py`.
+
 **Open items:** import 2021→2025 SOL history and re-run `strategy_compare.sh`
 — a ROBUSTNESS CHECK, not a verdict: at the implied per-trade Sharpe, n≈60
 gives E[t]≈0.89 against the 1.96 needed, so it will look confident and settle
