@@ -44,6 +44,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --entrypoint python is LOAD-BEARING, not tidiness. The image's ENTRYPOINT is
+# ["python", "-m", "app.main"] -- the trading application. `docker compose run
+# SERVICE cmd...` appends cmd as ARGUMENTS to that entrypoint rather than
+# replacing it, so without the override every "replay" launched a second
+# trading process instead, with the live .env and, because the service runs
+# under network_mode: "service:ib-gateway", inside the running gateway's
+# network namespace. They all died on the health port (which the live bot
+# already holds) a few lines BEFORE the broker is constructed, so nothing
+# connected and nothing traded -- but that was the startup order saving it,
+# not any property of this script. `exec` never had the problem because it
+# replaces the command outright.
+#
+# So RUNNER ends at the interpreter and the replay is invoked as `-m app.cli
+# backtest`: whatever else changes, the entrypoint cannot come back.
 if [[ $FRESH -eq 1 ]]; then
   echo "building sol-trading-bot from the working tree..." >&2
   docker compose build sol-trading-bot >&2
@@ -51,11 +65,11 @@ if [[ $FRESH -eq 1 ]]; then
   # behind. The replay needs only the SQLite database under ./data, which is
   # bind-mounted into every container from this compose file; the live bot
   # holds it in WAL mode, where a concurrent reader is safe.
-  RUNNER=(docker compose run --rm --no-deps -T sol-trading-bot)
+  RUNNER=(docker compose run --rm --no-deps -T --entrypoint python sol-trading-bot)
 else
   # The container that is currently running -- i.e. whatever image it was
   # started from, which may predate the checked-out source.
-  RUNNER=(docker compose exec -T sol-trading-bot)
+  RUNNER=(docker compose exec -T sol-trading-bot python)
 fi
 
 mkdir -p "$OUT"
@@ -134,7 +148,7 @@ for row in "${RUNS[@]}"; do
     RUN_EXTRA+=("$arg")
   done
   # shellcheck disable=SC2086
-  if "${RUNNER[@]}" python -m app.cli backtest \
+  if "${RUNNER[@]}" -m app.cli backtest \
        "${COMMON[@]}" $flags "${RUN_EXTRA[@]+"${RUN_EXTRA[@]}"}" \
        >"$OUT/$name.json" 2>"$OUT/$name.stderr"; then
     printf '%s\n' "$desc" >"$OUT/$name.desc"
