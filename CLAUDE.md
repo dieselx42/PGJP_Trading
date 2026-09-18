@@ -53,15 +53,31 @@ pass on the VPS.
 - Trend (B): net −$11,354 (gross −$6,240, n=12). Costs work as designed
   ($373/trade ≈ 4% of move) but entries lost; n too small to judge.
 
-**Candidate D — operator spec (2026-09-18).** NY only, 1 entry/day, plain
-$1 stop / $2 target, no breakeven, no trail. Needed two new knobs, both added:
-`breakeven_enabled` / `trail_enabled` (zero is not a legal distance, so "off"
-needed its own switch), and a `HH:MM@Zone` suffix on `--sessions` so running
-NY alone doesn't fall back to a fixed-UTC clock an hour early each winter.
-Runs as `d-bracket` / `d0-bracket-zerocost` / `d1-bracket-both-sessions` in
-`strategy_compare.sh`. Not yet measured. At 1 ct it needs a **50.8%** win rate
-(+$50 win, −$25 loss, ~$13 costs) vs 33.3% costless — and this same entry
-measured 49.8% with costs removed, so `d0` is the row that decides it.
+**Candidate D — operator spec, MEASURED 2026-09-18.** NY only, 1 entry/day,
+plain $1 stop / $2 target, no breakeven, no trail. Added `breakeven_enabled` /
+`trail_enabled` (zero is not a legal distance, so "off" needed a switch) and a
+`HH:MM@Zone` suffix on `--sessions` so running NY alone doesn't fall back to a
+fixed-UTC clock an hour early each winter.
+
+- d0 zero-cost: 105 trades, **31.4% win, gross −$2,160**. A 2:1 bracket needs
+  33.3% — short by 2 wins in 105. t = −0.43: no edge, and none refuted either.
+- d-bracket real costs: net −$44,054 (gross −$4,910, costs $39,144, n=105).
+  At 1 ct: −$1,101/yr. Halves the ORB's bleed but is still a loss.
+- d1 both sessions: −$45,233, n=126. NY-only was the better call.
+- **The breakeven fix worked as designed**: gross→net win rate 31.4%→29.5%
+  (2 trades flipped) vs the ORB's 49.8%→25.0% (62 flipped).
+
+Verdict: exit geometry was never the binding problem. The ORB entry is a coin
+flip and stays one. Do NOT retune stop/target against this year — 31.4% vs
+33.3% is inside the noise, and fitting it is exactly the trap in
+`STRATEGY_ANALYSIS.md` §7.3.
+
+**Replay costs understate reality by 40%.** The fill model uses 1 tick of
+slippage ($9.32/contract round trip); the measured MSL spread is 5 ticks
+(~$13.08). Every net number in the comparison is optimistic by that factor.
+
+**Hold benchmark is −$96,278 this year** — SOL fell, so "beats buy-and-hold"
+is a near-worthless bar in this window. Read the zero-cost column instead.
 
 **Live vs replay.** `app/main.py:188` passes only `position_contracts` to the
 strategy. Every other rule is replay-only. Arming any of this needs new fields
