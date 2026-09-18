@@ -16,22 +16,47 @@
 # `contract_metadata`, writes nothing, cannot reach a broker, and cannot
 # affect the running bot. Safe to run while the live process is armed.
 #
+# The application code is baked into the image -- only ./data and ./logs are
+# bind-mounted -- so a `git checkout` on the host does NOT change what the
+# running container executes. After pulling a branch that adds or renames a
+# strategy parameter, either rebuild and recreate (which restarts the live
+# bot) or use --fresh, which builds the image and runs the replays in a
+# throwaway container while the bot keeps trading untouched. --fresh is the
+# safer default choice and the reason this flag exists.
+#
 # Usage:
-#   scripts/strategy_compare.sh                     # every run
+#   scripts/strategy_compare.sh                     # every run, live container
+#   scripts/strategy_compare.sh --fresh             # build + throwaway container
 #   scripts/strategy_compare.sh --out /tmp/compare  # choose output dir
 #   scripts/strategy_compare.sh -- --start 2025-08-01 --end 2026-08-01
 #                                                   # extra flags -> every run
 set -euo pipefail
 
 OUT="./strategy-compare"
+FRESH=0
 EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out) OUT="$2"; shift 2 ;;
+    --fresh) FRESH=1; shift ;;
     --) shift; EXTRA=("$@"); break ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ $FRESH -eq 1 ]]; then
+  echo "building sol-trading-bot from the working tree..." >&2
+  docker compose build sol-trading-bot >&2
+  # --no-deps so this never starts IB Gateway, and --rm so nothing is left
+  # behind. The replay needs only the SQLite database under ./data, which is
+  # bind-mounted into every container from this compose file; the live bot
+  # holds it in WAL mode, where a concurrent reader is safe.
+  RUNNER=(docker compose run --rm --no-deps -T sol-trading-bot)
+else
+  # The container that is currently running -- i.e. whatever image it was
+  # started from, which may predate the checked-out source.
+  RUNNER=(docker compose exec -T sol-trading-bot)
+fi
 
 mkdir -p "$OUT"
 
@@ -109,7 +134,7 @@ for row in "${RUNS[@]}"; do
     RUN_EXTRA+=("$arg")
   done
   # shellcheck disable=SC2086
-  if docker compose exec -T sol-trading-bot python -m app.cli backtest \
+  if "${RUNNER[@]}" python -m app.cli backtest \
        "${COMMON[@]}" $flags "${RUN_EXTRA[@]+"${RUN_EXTRA[@]}"}" \
        >"$OUT/$name.json" 2>"$OUT/$name.stderr"; then
     printf '%s\n' "$desc" >"$OUT/$name.desc"
