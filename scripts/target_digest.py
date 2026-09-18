@@ -77,13 +77,17 @@ def main() -> int:
 
     for label, (ticks, _) in COST_CASES.items():
         if label != "hit":
-            print(f"  {label}: {ticks} slippage ticks/side -> "
-                  f"${cost_per_sol(ticks):.3f} per SOL round trip")
+            print(
+                f"  {label}: {ticks} slippage ticks/side -> "
+                f"${cost_per_sol(ticks):.3f} per SOL round trip"
+            )
     print()
 
-    head = (f"{'target':>7} {'trades':>7} {'hit rate':>9} "
-            f"{'needs (opt)':>12} {'needs (pess)':>13} {'margin':>8} "
-            f"{'net (opt)':>11} {'net (pess)':>11}")
+    head = (
+        f"{'target':>7} {'trades':>7} {'hit rate':>9} "
+        f"{'needs (opt)':>12} {'needs (pess)':>13} {'margin':>8} "
+        f"{'net (opt)':>11} {'net (pess)':>11}"
+    )
     print("=" * len(head))
     print(head)
     print("-" * len(head))
@@ -105,8 +109,8 @@ def main() -> int:
         need_pess = required_hit_rate(stop, t, cost_per_sol(Decimal("3")))
         margin = actual - need_pess
 
-        def net(tag: str) -> str:
-            doc = load(root / f"t{t}-{tag}.json")
+        def net(tag: str, target: Decimal = t) -> str:
+            doc = load(root / f"t{target}-{tag}.json")
             if doc is None:
                 return "n/a"
             return f"{Decimal(str(doc.get('performance', {}).get('net_pnl', 0))):+,.0f}"
@@ -129,8 +133,10 @@ def main() -> int:
         print("starting point for more tuning.")
     else:
         best = max(clears, key=lambda r: r[1])
-        print(f"{len(clears)} target(s) clear the line; widest margin at ${best[0]} "
-              f"({best[1] * 100:+.1f} pts, n={best[2]}).")
+        print(
+            f"{len(clears)} target(s) clear the line; widest margin at ${best[0]} "
+            f"({best[1] * 100:+.1f} pts, n={best[2]})."
+        )
         print()
         print("This is a HYPOTHESIS, not a setting. It was chosen by looking at this")
         print("year's result, which is the definition of fitting. Confirm it on data")
