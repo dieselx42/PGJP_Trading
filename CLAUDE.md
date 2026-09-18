@@ -72,6 +72,26 @@ flip and stays one. Do NOT retune stop/target against this year — 31.4% vs
 33.3% is inside the noise, and fitting it is exactly the trap in
 `STRATEGY_ANALYSIS.md` §7.3.
 
+**TARGET SWEEP — the entry is a random walk (2026-09-18, `scripts/target_sweep.sh`).**
+Same 105 NY signals, $1 stop, targets $1.50→$6.00, hit rate measured at zero
+cost. A driftless random walk hits +T before −S with probability S/(T+S). The
+measured rates track that curve across all seven targets:
+
+```
+target  1.50   2.00   2.50   3.00   4.00   5.00   6.00
+actual  39.0   31.4   26.7   25.7   23.8   19.0   14.3
+coinflip40.0   33.3   28.6   25.0   20.0   16.7   14.3
+edge    -1.0   -1.9   -1.9   +0.7   +3.8   +2.3   +0.0   mean +0.29 pts (1 SE 4.2)
+```
+
+margin = edge − cost/(T+S), exact on every row. **No target clears.** The ORB
+entry carries no directional information at ANY geometry — this closes the
+whole family, not one setting. Don't re-run variants of it.
+
+Design constraint for future entries: the cost term is smallest at a wide
+target ($4–6 → 8–11 pts, vs 19–23 pts at $1.50–2.00). Any new signal needs
+roughly 10+ pts of genuine edge, and is cheapest to harvest on big moves.
+
 **Replay costs understate reality by 40%.** The fill model uses 1 tick of
 slippage ($9.32/contract round trip); the measured MSL spread is 5 ticks
 (~$13.08). Every net number in the comparison is optimistic by that factor.
