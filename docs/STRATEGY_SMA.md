@@ -149,6 +149,25 @@ rows are this rule:
 `p_high` with the 0.05 and 0.95 thresholds beside it. Apply S1–S4 and K1–K4
 exactly as written and record the verdict in §9.
 
+## The one-year result, and the five-year run
+
+The first replay (one year, 2025–26) came back **inconclusive**: 26 flips,
++$2.33 per SOL before costs, sign-flip p = 0.49 — a coin toss, neither
+confirmed nor refuted. At 27 trades the test could not have seen anything
+smaller than a very large edge.
+
+The next run is five years of spot history, 2021-07-01 to 2026-09-20: about
+150 flips, enough for the sign-flip test to distinguish a modest edge from
+luck. Its criteria are fixed in `docs/STRATEGY_ANALYSIS.md` §10 before the
+data is imported. One new check, S5: the 2021–23 half and the 2024–26 half
+must agree on the sign of the result, so that one big trend cannot carry the
+whole verdict. Import commands and the run are in §10.
+
+Two honest caveats on that run: the one year already measured is inside the
+five, and no CME Solana contract existed before 2025 — so the five-year
+number measures whether the *signal* exists, not what the strategy would
+have earned.
+
 ## What to distrust
 
 - **Spot, not futures.** The replay is Coinbase spot; there is no basis, no

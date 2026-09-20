@@ -31,6 +31,7 @@ for this candidate (S3 and K1 in app/strategy/sma.py's plan).
 
 Usage:
     scripts/sign_flip.py strategy-compare/f0-sma-zerocost.json
+    scripts/sign_flip.py f5/f0-sma-zerocost.json --split 2024-01-01   # S5, section 10
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ import random
 import sys
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -78,11 +80,19 @@ class SignFlipResult:
     configurations: int
 
 
-def segments_from_report(doc: dict[str, object]) -> list[Decimal]:
-    """Per-segment gross in $/SOL: every closed trade, then the open tail.
+def dated_segments_from_report(
+    doc: dict[str, object], *, require_dates: bool = False
+) -> list[tuple[datetime | None, Decimal]]:
+    """Per-segment gross in $/SOL with when each segment opened.
 
-    Refuses a truncated trade list rather than testing part of a year: the
-    report caps ``trades.detail`` at 50 rows, and a strategy that exceeds it
+    Every closed trade, then the open tail, whose opening time is ``None``:
+    it is the most recent segment by construction, so a date split always
+    puts it in the later bucket. A closed trade without ``opened_at`` (an
+    older report) is also ``None`` unless ``require_dates`` -- the split path
+    -- in which case it is refused, because an undated trade would land in
+    the later bucket silently. Refuses a truncated trade list rather than
+    testing part of a window: the report caps ``trades.detail`` at
+    ``app.backtest.results.DETAIL_ROWS``, and a strategy that exceeds it
     needs the cap lifted, not a silent subset.
     """
     trades = doc["trades"]
@@ -90,12 +100,19 @@ def segments_from_report(doc: dict[str, object]) -> list[Decimal]:
     if trades.get("detail_truncated", 0):
         raise ValueError(
             f"trades.detail is truncated by {trades['detail_truncated']} rows; "
-            "lift the 50-row cap in app/backtest/results.py before testing"
+            "raise DETAIL_ROWS in app/backtest/results.py before testing"
         )
-    segments = [
-        Decimal(str(t["gross_pnl"])) / (SOL_PER_CONTRACT * int(t["quantity"]))
-        for t in trades["detail"]
-    ]
+    segments: list[tuple[datetime | None, Decimal]] = []
+    for i, t in enumerate(trades["detail"]):
+        opened: datetime | None = None
+        if t.get("opened_at") is not None:
+            opened = datetime.fromisoformat(str(t["opened_at"]))
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=UTC)
+        elif require_dates:
+            raise ValueError(f"trade {i} has no opened_at; --split needs dated trades")
+        gross = Decimal(str(t["gross_pnl"])) / (SOL_PER_CONTRACT * int(t["quantity"]))
+        segments.append((opened, gross))
     final_position = int(trades.get("final_position", 0))
     if final_position != 0:
         performance = doc["performance"]
@@ -106,8 +123,43 @@ def segments_from_report(doc: dict[str, object]) -> list[Decimal]:
                 "the replay ended holding a position but performance.final_unrealized "
                 "is missing; re-run with a build that reports it"
             )
-        segments.append(Decimal(str(unrealized)) / (SOL_PER_CONTRACT * abs(final_position)))
+        segments.append((None, Decimal(str(unrealized)) / (SOL_PER_CONTRACT * abs(final_position))))
     return segments
+
+
+def segments_from_report(doc: dict[str, object]) -> list[Decimal]:
+    """Per-segment gross in $/SOL: every closed trade, then the open tail."""
+    return [gross for _, gross in dated_segments_from_report(doc)]
+
+
+def split_sums(
+    dated: list[tuple[datetime | None, Decimal]], at: datetime
+) -> tuple[tuple[int, Decimal], tuple[int, Decimal]]:
+    """Gross summed over segments opened before ``at`` and from ``at`` on.
+
+    The sub-period check for a multi-year window (S5 in STRATEGY_ANALYSIS.md
+    section 10): it can only DOWNGRADE a verdict, never upgrade one, and it
+    is computed from the single full-window run rather than from two shorter
+    replays, so neither half loses a warm-up and the pieces sum to the whole.
+    """
+    before = [g for d, g in dated if d is not None and d < at]
+    after = [g for d, g in dated if d is None or d >= at]
+    return (len(before), sum(before, Decimal(0))), (len(after), sum(after, Decimal(0)))
+
+
+def render_split(at: datetime, dated: list[tuple[datetime | None, Decimal]]) -> str:
+    (n_before, g_before), (n_after, g_after) = split_sums(dated, at)
+    total = g_before + g_after
+    same_sign = (g_before > 0) == (total > 0) and (g_after > 0) == (total > 0)
+    verdict = "holds" if same_sign else "does not hold -> SUCCESS downgrades to INCONCLUSIVE"
+    return "\n".join(
+        [
+            f"  split at {at.date().isoformat()}",
+            f"    before: n={n_before:<4} G={g_before:+,.2f} $/SOL",
+            f"    after:  n={n_after:<4} G={g_after:+,.2f} $/SOL",
+            f"  S5 (both halves carry the whole window's sign): {verdict}",
+        ]
+    )
 
 
 def sign_flip(segments: list[Decimal], *, seed: int = SEED, draws: int = DRAWS) -> SignFlipResult:
@@ -279,21 +331,38 @@ def render(name: str, result: SignFlipResult) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print(f"usage: {Path(argv[0]).name} <backtest-result.json>", file=sys.stderr)
+    usage = f"usage: {Path(argv[0]).name} <backtest-result.json> [--split YYYY-MM-DD]"
+    args = argv[1:]
+    split: datetime | None = None
+    if "--split" in args:
+        i = args.index("--split")
+        if i + 1 >= len(args):
+            print(usage, file=sys.stderr)
+            return 2
+        try:
+            split = datetime.fromisoformat(args[i + 1]).replace(tzinfo=UTC)
+        except ValueError:
+            print(f"--split {args[i + 1]!r} is not YYYY-MM-DD", file=sys.stderr)
+            return 2
+        del args[i : i + 2]
+    if len(args) != 1:
+        print(usage, file=sys.stderr)
         return 2
-    path = Path(argv[1])
+    path = Path(args[0])
     try:
         doc = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         print(f"{path}: unreadable ({exc})", file=sys.stderr)
         return 2
     try:
-        result = sign_flip(segments_from_report(doc))
+        dated = dated_segments_from_report(doc, require_dates=split is not None)
+        result = sign_flip([g for _, g in dated])
     except (KeyError, ValueError, TypeError) as exc:
         print(f"{path}: {exc}", file=sys.stderr)
         return 1
     print(render(path.name, result))
+    if split is not None:
+        print(render_split(split, dated))
     return 0
 
 

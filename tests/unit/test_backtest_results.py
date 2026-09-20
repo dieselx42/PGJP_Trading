@@ -435,11 +435,21 @@ class TestDescribe:
         assert isinstance(described["performance"]["net_pnl"], str)  # type: ignore[index]
 
     def test_long_lists_are_truncated_and_say_by_how_much(self) -> None:
-        described = build_report(_run(trades=tuple(_trade("1") for _ in range(60)))).describe()
+        from app.backtest.results import DETAIL_ROWS
 
-        assert len(described["trades"]["detail"]) == 50  # type: ignore[index]
+        over = DETAIL_ROWS + 10
+        described = build_report(_run(trades=tuple(_trade("1") for _ in range(over)))).describe()
+
+        assert len(described["trades"]["detail"]) == DETAIL_ROWS  # type: ignore[index]
         assert described["trades"]["detail_truncated"] == 10  # type: ignore[index]
-        assert described["trades"]["count"] == 60, "the count is never truncated"  # type: ignore[index]
+        assert described["trades"]["count"] == over, "the count is never truncated"  # type: ignore[index]
+
+    def test_the_cap_clears_a_five_year_sol_sma_run(self) -> None:
+        """~150 flips over five years must fit: sign_flip.py refuses a
+        truncated list, so a cap below that is a hard stop, not a nuisance."""
+        from app.backtest.results import DETAIL_ROWS
+
+        assert DETAIL_ROWS >= 300
 
     def test_short_lists_report_nothing_truncated(self) -> None:
         described = build_report(_run(trades=(_trade("1"),))).describe()

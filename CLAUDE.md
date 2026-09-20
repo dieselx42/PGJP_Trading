@@ -111,8 +111,12 @@ net −$12,849 at 3 ticks, sign-flip **p = 0.49** (exact, 2²⁷). S1–S3 fail,
 kill fires. At 1 ct: +$58 gross, $379 toll, −$321 net. Not refuted, nothing
 shown. Stays registered, no parameter change, no live money. **Ignore the
 100-day rows** (+$58,760 on n=7 — sign-check only, exactly the trap §7/§9
-name). Highest-value next step: import 2021→2025 → n≈125 gives the sign-flip
-test power; re-register S0 count bounds and K2 for a 5-yr window FIRST.
+name). **Five-year run PRE-REGISTERED in `STRATEGY_ANALYSIS.md` §10** (window
+2021-07-01→2026-09-20, ~150 flips; S0 110..200, K2 −$172/SOL, new S5 =
+`sign_flip.py --split 2024-01-01` sign agreement, downgrade-only). Import =
+three `bars-import` chunks (4,000-page ceiling ≈ 833 days each; commands in
+§10). `DETAIL_ROWS` raised 50→2,000 in `results.py` — `sign_flip.py` refuses a
+truncated list, so 50 would have been a hard stop at ~150 flips. Not yet run.
 
 **Replay costs understate reality by 40%.** The fill model uses 1 tick of
 slippage ($9.32/contract round trip); the measured MSL spread is 5 ticks

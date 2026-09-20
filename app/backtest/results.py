@@ -25,6 +25,14 @@ from app.backtest.engine import BacktestRun, ClosedTrade
 #: is reported alongside the Sharpe it produced so nobody has to guess.
 _MINUTES_PER_YEAR: Final = 365 * 24 * 60
 
+#: Rows of per-trade (and per-refusal) detail the report carries before it
+#: truncates and says so. It was 50, sized for reading one ORB year by eye.
+#: scripts/sign_flip.py REFUSES a truncated list rather than test a subset,
+#: and sol-sma over five years is ~150 flips, so 50 would have turned the
+#: five-year run into a hard stop. 2,000 covers the ORB's ~1,240 trades over
+#: the same window at well under a megabyte; the count is never truncated.
+DETAIL_ROWS = 2000
+
 #: Above this share of bars with no trades, the venue is too thin at this
 #: interval for a result to mean much, and the note leads rather than trails.
 _THIN_SERIES_SHARE: Final = 0.25
@@ -106,15 +114,15 @@ class BacktestReport:
                 "average_win": None if self.average_win is None else str(self.average_win),
                 "average_loss": None if self.average_loss is None else str(self.average_loss),
                 "final_position": run.final_position,
-                "detail": [t.describe() for t in run.trades[:50]],
-                "detail_truncated": max(0, len(run.trades) - 50),
+                "detail": [t.describe() for t in run.trades[:DETAIL_ROWS]],
+                "detail_truncated": max(0, len(run.trades) - DETAIL_ROWS),
             },
             "attribution": _attribution(run.trades),
             "refusals": {
                 "count": self.refusal_count,
                 "by_reason": self.refusals_by_reason,
-                "detail": [r.describe() for r in run.refusals[:50]],
-                "detail_truncated": max(0, len(run.refusals) - 50),
+                "detail": [r.describe() for r in run.refusals[:DETAIL_ROWS]],
+                "detail_truncated": max(0, len(run.refusals) - DETAIL_ROWS),
                 "note": (
                     "a refusal is the risk manager or the transmit gate doing its job. "
                     "A strategy whose results depend on these not firing will not perform "

@@ -392,3 +392,109 @@ real power. That is a legitimate out-of-sample run — 50 was chosen on priors,
 not on any data — but S0's count bounds and K2's dollar threshold are written
 for a one-year window and must be re-registered for the longer one *before*
 it runs.
+
+## 10. Candidate F (`sol-sma`) — five-year out-of-sample pre-registration, written before the import
+
+Everything here was fixed before a single bar of 2021–2025 history was
+imported. Nothing may be edited after a number has been seen.
+
+**Window.** 2021-07-01 → 2026-09-20 UTC, Coinbase SOL-USD spot. SOL-USD was
+listed on Coinbase in June 2021; July 1 is the first clean month. 1,907
+calendar days, 1,858 after the 49-day warm-up.
+
+**Why this run.** At n = 27 the sign-flip null had almost no power: its 5th
+and 95th percentiles sat at ±$126/SOL against a realised +$2.33. At ~25 flips
+a year this window gives n ≈ 150, where the same test can distinguish a
+per-segment mean of roughly $4/SOL from zero — about the size the published
+time-series-momentum evidence implies. The 50-day window was chosen on priors
+in §9 and has never moved, so the run is out of sample for the parameter.
+
+**What is not out of sample.** The §9 year is inside this window; its
++$2.33/SOL is a known component of the total, not new evidence. And 2021–22
+contains SOL's largest trend in each direction, where any trend rule looks
+good — S5 below exists for exactly that.
+
+**Import.** Three `bars-import` chunks, each under the source's 4,000-page
+ceiling (~833 days at 300 one-minute candles a page); `INSERT OR IGNORE`
+makes the overlap with the existing year idempotent. Run from the freshly
+built image in a throwaway container, as the replays are:
+
+```
+cd /opt/sol-futures-trading-bot
+git pull origin claude/test-tpxkgy
+docker compose build sol-trading-bot
+docker compose run --rm --no-deps -T --entrypoint python sol-trading-bot \
+  -m app.cli bars-import --source coinbase --symbol SOL-USD --interval 1m \
+  --start 2021-07-01 --end 2023-07-01
+docker compose run --rm --no-deps -T --entrypoint python sol-trading-bot \
+  -m app.cli bars-import --source coinbase --symbol SOL-USD --interval 1m \
+  --start 2023-07-01 --end 2025-07-01
+docker compose run --rm --no-deps -T --entrypoint python sol-trading-bot \
+  -m app.cli bars-import --source coinbase --symbol SOL-USD --interval 1m \
+  --start 2025-07-01 --end 2026-09-21
+```
+
+Roughly ten minutes a chunk at the source's 0.15 s request interval, longer
+if it asks us to back off. Each prints a JSON result; a chunk that stops
+early is re-run with the same arguments.
+
+**The runs.** The §9 `f` rows, unchanged, with the window pinned:
+
+```
+scripts/strategy_compare.sh --fresh --out /tmp/f5 -- --start 2021-07-01 --end 2026-09-20
+scripts/sign_flip.py /tmp/f5/f0-sma-zerocost.json --split 2024-01-01
+```
+
+The §9 one-year rows are not re-run and their verdict stands as recorded.
+
+**Criteria.** Everything is §9 verbatim except what depends on the window's
+length, which is rescaled here by the same constructions:
+
+- **S0.** `110 <= trades.count <= 200` (null expectation ~150 at 0.08 flips
+  a day over 1,858 days, SD ~12; the same −2.6 SD / +4 SD asymmetry as §9's
+  12..45). `days_in_warmup == 49`. The cost identity `commission_paid == 3.41
+  × (40 + 80 × flips)` and its slippage twin, with the realised flip count.
+  `trades.detail_truncated == 0` (the cap is now 2,000 rows;
+  `scripts/sign_flip.py` refuses a truncated list, so a cap below the flip
+  count would have been a hard stop). Zero-cost twin identical decisions.
+- **S1.** Total of `f3-sma-net3` > 0 per SOL. Unchanged.
+- **S2.** Mean gross per segment ≥ +$1.15/SOL with n ≥ 110 (the floor raised
+  to S0's lower bound; §9's 15 is trivially met here).
+- **S3.** `p_high < 0.05`. Unchanged; n > 30 so 200,000 draws from seed
+  20260919.
+- **S4.** Sign agreement of `f1` (25-day) and `f2` (100-day) with `f0`.
+  Unchanged; downgrade only.
+- **S5 — sub-period sign agreement, downgrade only.** From the single full
+  run, `--split 2024-01-01`: the zero-cost gross of segments opened before
+  and from that date must both carry the whole window's sign. The date
+  splits the window into 915 and 992 days and separates the 2021–22
+  bull-and-crash from 2024–26; it was chosen for calendar symmetry before
+  any number was seen. Disagreement turns SUCCESS into INCONCLUSIVE. It is
+  computed from one run rather than two, so neither half loses a warm-up and
+  the halves sum to the whole.
+- **K1.** `p_high ≥ 0.95`. Unchanged.
+- **K2.** Zero-cost total ≤ −$172/SOL (−$172,000 at 40 contracts) = −2 ×
+  (150 × $0.573), §9's construction scaled to the window's toll. Against a
+  null SD of roughly $249/SOL that is z ≈ −0.69, firing in ~25% of null
+  windows.
+- **K3.** 3-tick total ≤ 0 for all of `f3`, `f4`, `f5`. Unchanged.
+- **K4.** `trades.count > 200` and zero-cost total ≤ 0.
+- **K5–K7.** Live-trial kills, unchanged.
+
+**Verdict map.** As §9, with one change: an INCONCLUSIVE here is re-tested
+when twelve more months exist, not six — the window is long enough that six
+months adds little.
+
+**Run protocol.** (1) Import, three chunks. (2) The compare run with the
+window pinned. (3) Read S0 only; fix and re-run on any failure. (4) The
+sign-flip with `--split`. (5) Apply S1–S5 and K1–K4 exactly as written and
+record the verdict here with the numbers.
+
+**Honesty notes that travel with the result.** Spot, not futures — and no
+CME SOL contract existed before 2025, so for most of this window the
+strategy could not have been executed at all: this measures the *signal*, not
+the tradeable strategy. Survivorship: SOL is analysed because it is large now.
+The §9 year is inside the window. One rule, one instrument, one pre-registered
+run; a second look at any of it is a new section.
+
+**Verdict:** _not yet run._

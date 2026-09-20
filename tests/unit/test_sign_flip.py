@@ -202,3 +202,101 @@ class TestCommand:
         bad = tmp_path / "bad.json"
         bad.write_text(json.dumps({"trades": {"detail": [], "detail_truncated": 0}}))
         assert main(["sign_flip.py", str(bad)]) == 1
+
+
+class TestSplit:
+    """The sub-period check for a multi-year window (section 10, S5)."""
+
+    @staticmethod
+    def _doc() -> dict[str, object]:
+        def trade(opened: str, gross: str) -> dict[str, object]:
+            return {"opened_at": opened, "gross_pnl": gross, "quantity": 40}
+
+        return {
+            "trades": {
+                "count": 3,
+                "detail": [
+                    trade("2023-03-01T00:01:00+00:00", "1000"),  # +1.00 $/SOL, before
+                    trade("2023-12-31T00:01:00+00:00", "-500"),  # -0.50 $/SOL, before
+                    trade(
+                        "2024-01-01T00:01:00+00:00", "2000"
+                    ),  # +2.00 $/SOL, on the split -> after
+                ],
+                "detail_truncated": 0,
+                "final_position": -40,
+            },
+            "performance": {"final_unrealized": "-250"},  # -0.25 $/SOL, the tail -> after
+        }
+
+    def test_the_tail_and_the_split_day_land_in_the_later_bucket(self) -> None:
+        from datetime import UTC, datetime
+
+        from scripts.sign_flip import dated_segments_from_report, split_sums
+
+        dated = dated_segments_from_report(self._doc())
+        (n_before, g_before), (n_after, g_after) = split_sums(
+            dated, datetime(2024, 1, 1, tzinfo=UTC)
+        )
+        assert (n_before, g_before) == (2, Decimal("0.5"))
+        assert (n_after, g_after) == (2, Decimal("1.75"))
+        assert g_before + g_after == sum(g for _, g in dated), "the halves sum to the whole"
+
+    def test_a_naive_timestamp_is_read_as_utc(self) -> None:
+        from datetime import UTC, datetime
+
+        from scripts.sign_flip import dated_segments_from_report
+
+        doc = self._doc()
+        doc["trades"]["detail"][0]["opened_at"] = "2023-03-01T00:01:00"  # type: ignore[index]
+        [(opened, _), *_] = dated_segments_from_report(doc)
+        assert opened == datetime(2023, 3, 1, 0, 1, tzinfo=UTC)
+
+    def test_command_prints_the_split_and_its_verdict(self, tmp_path: Path) -> None:
+        import contextlib
+        import io
+        import json
+
+        from scripts.sign_flip import main
+
+        path = tmp_path / "r.json"
+        path.write_text(json.dumps(self._doc()))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["sign_flip.py", str(path), "--split", "2024-01-01"])
+        text = out.getvalue()
+        assert code == 0
+        assert "split at 2024-01-01" in text
+        assert "before: n=2    G=+0.50" in text
+        assert "after:  n=2    G=+1.75" in text
+        assert "S5" in text and "holds" in text
+
+    def test_a_half_with_the_wrong_sign_downgrades(self) -> None:
+        from datetime import UTC, datetime
+
+        from scripts.sign_flip import dated_segments_from_report, render_split
+
+        doc = self._doc()
+        doc["trades"]["detail"][0]["gross_pnl"] = "100"  # type: ignore[index]
+        text = render_split(datetime(2024, 1, 1, tzinfo=UTC), dated_segments_from_report(doc))
+        assert "does not hold" in text and "INCONCLUSIVE" in text
+
+    def test_split_refuses_an_undated_trade_rather_than_misfiling_it(self, tmp_path: Path) -> None:
+        import json
+
+        from scripts.sign_flip import dated_segments_from_report, main
+
+        doc = self._doc()
+        del doc["trades"]["detail"][1]["opened_at"]  # type: ignore[index]
+        # Without a split the undated trade is fine: it is only its date that is unknown.
+        assert len(dated_segments_from_report(doc)) == 4
+        with pytest.raises(ValueError, match="opened_at"):
+            dated_segments_from_report(doc, require_dates=True)
+        path = tmp_path / "r.json"
+        path.write_text(json.dumps(doc))
+        assert main(["sign_flip.py", str(path), "--split", "2024-01-01"]) == 1
+
+    def test_bad_split_argument_is_usage(self, tmp_path: Path) -> None:
+        from scripts.sign_flip import main
+
+        assert main(["sign_flip.py", str(tmp_path / "x.json"), "--split"]) == 2
+        assert main(["sign_flip.py", str(tmp_path / "x.json"), "--split", "nope"]) == 2
