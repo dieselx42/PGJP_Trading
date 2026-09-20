@@ -106,6 +106,14 @@ move them after a number is seen. Team doc: `docs/STRATEGY_SMA.md`. Rows
 `performance.final_unrealized` to net/gross — always-in rows end open.
 Run: `scripts/strategy_compare.sh --fresh --out /tmp/f && scripts/sign_flip.py /tmp/f/f0-sma-zerocost.json`.
 
+**F VERDICT (2026-09-20): INCONCLUSIVE.** 26 flips, gross +$2,330 (+$2.33/SOL),
+net −$12,849 at 3 ticks, sign-flip **p = 0.49** (exact, 2²⁷). S1–S3 fail, no
+kill fires. At 1 ct: +$58 gross, $379 toll, −$321 net. Not refuted, nothing
+shown. Stays registered, no parameter change, no live money. **Ignore the
+100-day rows** (+$58,760 on n=7 — sign-check only, exactly the trap §7/§9
+name). Highest-value next step: import 2021→2025 → n≈125 gives the sign-flip
+test power; re-register S0 count bounds and K2 for a 5-yr window FIRST.
+
 **Replay costs understate reality by 40%.** The fill model uses 1 tick of
 slippage ($9.32/contract round trip); the measured MSL spread is 5 ticks
 (~$13.08). Every net number in the comparison is optimistic by that factor.

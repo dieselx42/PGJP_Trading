@@ -359,4 +359,36 @@ average spans ~8.3 calendar weeks instead of ~7.1. A `cme-crypto` session
 filter for the replay is the engine follow-up that would close this; it is
 an additional pessimistic row, never a parameter choice.
 
-**Verdict:** _not yet run._
+**Verdict (run 2026-09-20, one year of Coinbase spot, 40 contracts):
+INCONCLUSIVE — not refuted, nothing shown.**
+
+| criterion | result | reading |
+|---|---|---|
+| S0 gate | passes | 26 flips (27 segments); `f3` costs 15,179 = 3.41×2120 + 3×1.25×2120 exactly; zero-cost twin same 26 trades; open final position +8,210 reported |
+| S1 net at 3 ticks | **fails** | `f3-sma-net3` total −12,849 (gross +2,330, toll 15,179) |
+| S2 gross/segment ≥ +$1.15/SOL | **fails** | +$0.09/SOL |
+| S3 sign-flip p < 0.05 | **fails** | p_high = 0.4897, exact over 2²⁷ sign vectors |
+| S4 sign agreement | holds | `f0` +2,330, `f1` +7,680, `f2` +58,760 — all positive; moot |
+| K1–K4 | none fire | p 0.49; zero-cost +$2.33/SOL; `f5` +54,464 breaks K3's "all three"; 26 flips |
+
+At one contract: gross +$58, toll $379, net −$321 for the year. The rule's
+direction calls were indistinguishable from a coin toss on this data; p =
+0.49 is as close to "no information" as a test can return. It is not
+evidence the rule is wrong-sided either. Per the map: no live money, no
+parameter change, the identical criteria re-applied when six more months of
+bars exist.
+
+**The 100-day rows are the trap this section was written to prevent.**
+`f2`/`f5` show +$58,760 gross on *seven* trades — one bet that happened to
+ride the year's decline. n = 7 is the "confident-looking number carrying
+almost no information" §7 warns about. They were read for sign only, they
+agree, and `sma_days` stays 50. Anyone proposing 100 days on the strength of
+that row is proposing a fitted parameter with n = 7 behind it.
+
+**What would actually move this.** Importing 2021→2025 spot history (the
+open item) is worth far more to this candidate than it was to `sol-trend`:
+~25 flips a year makes n ≈ 125 over five years, where the sign-flip test has
+real power. That is a legitimate out-of-sample run — 50 was chosen on priors,
+not on any data — but S0's count bounds and K2's dollar threshold are written
+for a one-year window and must be re-registered for the longer one *before*
+it runs.
