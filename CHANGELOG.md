@@ -7,6 +7,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `app/strategy/fade.py` (`sol-fade`) — Connors & Raschke's failed
+  channel-break rule on a closing basis: a close beyond the 20-day channel of
+  closes that closes back inside within two days, stop at the break's extreme,
+  target the channel midpoint, 10-day time exit. Pre-registered in
+  `docs/STRATEGY_ANALYSIS.md` §12 as a complement to `sol-sma`. Rows `g*` in
+  `strategy_compare.sh`, which also gains `--only PREFIX`.
+- `scripts/cross_asset.sh` — the identical `sol-sma` rule on BTC-USD and
+  ETH-USD, sign-flip only, per §11.
+- `daily.close_channel` — the Donchian channel over closes.
+
 - `app/strategy/sma.py` (`sol-sma`) — close versus its 50-day simple moving
   average: long above, short below, always in, flip only. One parameter. The
   candidate chosen by a five-lens design panel and three comparative judges

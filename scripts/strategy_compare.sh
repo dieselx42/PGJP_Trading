@@ -28,17 +28,20 @@
 #   scripts/strategy_compare.sh                     # every run, live container
 #   scripts/strategy_compare.sh --fresh             # build + throwaway container
 #   scripts/strategy_compare.sh --out /tmp/compare  # choose output dir
+#   scripts/strategy_compare.sh --only g             # just the rows named g*
 #   scripts/strategy_compare.sh -- --start 2025-08-01 --end 2026-08-01
 #                                                   # extra flags -> every run
 set -euo pipefail
 
 OUT="./strategy-compare"
 FRESH=0
+ONLY=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out) OUT="$2"; shift 2 ;;
     --fresh) FRESH=1; shift ;;
+    --only) ONLY="$2"; shift 2 ;;   # run only rows whose name starts with this
     --) shift; EXTRA=("$@"); break ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -148,6 +151,14 @@ NY_ONLY="--sessions 09:30@America/New_York"
 SMA="position_contracts=40"
 SMA_ORDER="--max-order-size 80"
 
+# Candidate G fades the level the Turtle system buys: a close beyond the
+# 20-day channel of closes that closes back inside within two days, with the
+# stop at the break's extreme close and the target at the channel midpoint.
+# Connors & Raschke's published numbers, on a closing basis; pre-registered
+# in docs/STRATEGY_ANALYSIS.md section 12 as a COMPLEMENT to sol-sma -- it is
+# read for whether it earns in the months the trend rule does not.
+FADE="position_contracts=40"
+
 # name|description|strategy flags
 RUNS=(
   "z-hold-benchmark|BENCHMARK: passive long, rolled quarterly|--strategy sol-hold --strategy-params position_contracts=40"
@@ -171,11 +182,17 @@ RUNS=(
   "f2-sma100-signcheck|Candidate F doubled window, SIGN AGREEMENT ONLY, may not change sma_days|--strategy sol-sma --strategy-params $SMA,sma_days=100 $SMA_ORDER ${ZEROCOST[*]}"
   "f4-sma25-net3|Candidate F halved window at 3 ticks (K3 only)|--strategy sol-sma --strategy-params $SMA,sma_days=25 $SMA_ORDER --slippage-ticks 3"
   "f5-sma100-net3|Candidate F doubled window at 3 ticks (K3 only)|--strategy sol-sma --strategy-params $SMA,sma_days=100 $SMA_ORDER --slippage-ticks 3"
+  "g-fade|Candidate G: failed 20-day channel break (Turtle Soup on closes), 1-tick costs|--strategy sol-fade --strategy-params $FADE"
+  "g0-fade-zerocost|Candidate G raw edge (sign-flip input)|--strategy sol-fade --strategy-params $FADE ${ZEROCOST[*]}"
+  "g3-fade-net3|Candidate G at the pessimistic 3-tick bracket (PRIMARY)|--strategy sol-fade --strategy-params $FADE --slippage-ticks 3"
+  "g1-fade10-signcheck|Candidate G halved channel, SIGN AGREEMENT ONLY|--strategy sol-fade --strategy-params $FADE,channel_days=10 ${ZEROCOST[*]}"
+  "g2-fade40-signcheck|Candidate G doubled channel, SIGN AGREEMENT ONLY|--strategy sol-fade --strategy-params $FADE,channel_days=40 ${ZEROCOST[*]}"
 )
 
 echo "writing to $OUT" >&2
 for row in "${RUNS[@]}"; do
   IFS='|' read -r name desc flags <<<"$row"
+  if [[ -n "$ONLY" && "$name" != "$ONLY"* ]]; then continue; fi
   echo "--- $name: $desc" >&2
   # --sessions is an ORB-only diagnostic (the CLI injects it as a strategy
   # param, and sol-trend and sol-sma -- 24/7 daily systems -- rightly refuse
@@ -184,8 +201,8 @@ for row in "${RUNS[@]}"; do
   skip_next=0
   for arg in ${EXTRA[@]+"${EXTRA[@]}"}; do
     if [[ $skip_next -eq 1 ]]; then skip_next=0; continue; fi
-    if [[ ( "$flags" == *sol-trend* || "$flags" == *sol-sma* ) && "$arg" == --sessions ]]; then skip_next=1; continue; fi
-    if [[ ( "$flags" == *sol-trend* || "$flags" == *sol-sma* ) && "$arg" == --sessions=* ]]; then continue; fi
+    if [[ ( "$flags" == *sol-trend* || "$flags" == *sol-sma* || "$flags" == *sol-fade* ) && "$arg" == --sessions ]]; then skip_next=1; continue; fi
+    if [[ ( "$flags" == *sol-trend* || "$flags" == *sol-sma* || "$flags" == *sol-fade* ) && "$arg" == --sessions=* ]]; then continue; fi
     RUN_EXTRA+=("$arg")
   done
   # shellcheck disable=SC2086

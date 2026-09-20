@@ -527,14 +527,128 @@ crossed its own average less often than that; and the concentration of the
 result in one cycle phase is exactly the regime dependence a trend rule is
 expected to have.
 
-## 11. Proposed next test — the same rule on other assets (not yet registered)
+## 11. The same rule on BTC and ETH — pre-registered, written before the import
 
-The cheapest independent evidence for the *rule* — as opposed to for SOL —
-is to run it unchanged on BTC-USD and ETH-USD spot over the identical
-window with the identical §10 criteria. Nothing about the rule is SOL-
-specific. Before running it, two things have to be written down here: that
-the three assets are strongly correlated, so the same 2022 collapse drives
-all three and the three p-values are far from independent; and what
-combination rule will be applied (proposal: all three must individually
-clear S3, or the joint result is INCONCLUSIVE). Until that is written, this
-section is a proposal and no BTC or ETH run may be read against SOL's.
+**What.** `sol-sma`, unchanged (50 days, long/short, always in), on Coinbase
+BTC-USD and ETH-USD spot over the identical window 2021-07-01 → 2026-09-20,
+at one contract with costs off. Nothing about the rule is SOL-specific; this
+is evidence about the *rule*, not about SOL.
+
+**What is read, and what is not.** The replay never invents a contract, so
+BTC and ETH are priced through the MSL metadata (25 units, $0.05 tick): every
+dollar figure is meaningless and is not read. The sign-flip statistic is
+invariant to a common scale, so `scripts/sign_flip.py` on each asset's
+zero-cost result, with `--split 2024-01-01`, is the whole test. Run with
+`scripts/cross_asset.sh --fresh --out /tmp/xa`.
+
+**The caveat that comes first.** The three assets share the 2022 collapse and
+the 2024 run. Three p-values here are correlated evidence, not three
+independent tests, and the combination rule below is written knowing that.
+
+**Verdicts, fixed now.**
+- **SUPPORTED:** BTC and ETH both `p_high < 0.05`, and each asset's two halves
+  carry the same sign. The rule is not a SOL accident. SOL's own §10 verdict
+  stays INCONCLUSIVE; what changes is that continuing the paper trial and
+  planning a multi-asset trial (CME lists micro Bitcoin and micro Ether) is
+  justified.
+- **REFUTED:** any asset `p_high ≥ 0.95`, or BTC and ETH both `p_high > 0.50`.
+  SOL's 0.072 is then most likely luck; the family is set aside and the paper
+  trial is stopped when the current position closes.
+- **INCONCLUSIVE:** anything else. Nothing changes.
+
+**Import** (three chunks each, same as SOL's; `--end` is clamped to now):
+
+```
+for SYM in BTC-USD ETH-USD; do for R in "2021-07-01 2023-07-01" "2023-07-01 2025-07-01" "2025-07-01 2026-09-21"; do
+  set -- $R
+  docker compose run --rm --no-deps -T --entrypoint python sol-trading-bot \
+    -m app.cli bars-import --source coinbase --symbol $SYM --interval 1m --start $1 --end $2
+done; done
+```
+
+**Verdict:** _not yet run._
+
+## 12. Candidate G (`sol-fade`) — the complement, pre-registered before any replay
+
+**The rule in one sentence.** When a day closes below the lowest close of the
+previous 20 days and, within the next two days, a close is back above that
+level, the breakdown failed: buy at the next open, stop at the lowest close
+of the break, target the middle of the 20-day range; mirror it for a failed
+breakup. Exit on the stop, the target, or after 10 days. Nothing else.
+
+**Where it comes from and why these numbers.** Connors & Raschke's "Turtle
+Soup" (1995) fades the 20-day channel the Turtle system buys. Every parameter
+is theirs, translated to a closing basis: channel 20; the prior extreme at
+least 4 days old (a range, not a slide); the failure confirmed within 2 days;
+the stop at the break's extreme; a short hold (10 days, half the channel).
+Closes rather than highs and lows because the live bars are sampled and their
+extremes are understated. No parameter was chosen by looking at a result.
+Full rule with every ambiguity resolved: the module docstring of
+`app/strategy/fade.py`.
+
+**Why it is a complement.** `sol-sma` pays a flip every time price crosses its
+line and earns only when price leaves it. This rule earns when price rejects
+an edge of its range and loses when a break is real. August 2026 is the
+worked example: the trend rule paid five flips in the Aug 9–19 chop and
+earned on the Aug 19 breakout; this rule should have earned in the chop and
+been stopped on the breakout. It is judged on its own criteria below *and* on
+whether it is in fact a complement — not on whether it beats `sol-sma`.
+
+**The runs.** Window 2021-07-01 → 2026-09-20, 40 contracts, harness limits:
+`g3-fade-net3` (3 ticks/side, PRIMARY), `g0-fade-zerocost` (sign-flip input),
+`g-fade` (1 tick, continuity), `g1-fade10-signcheck` and `g2-fade40-signcheck`
+(channel 10 and 40, zero cost, SIGN ONLY, may never move `channel_days`).
+`scripts/strategy_compare.sh --fresh --only g --out /tmp/g -- --start
+2021-07-01 --end 2026-09-20`, then `scripts/sign_flip.py
+/tmp/g/g0-fade-zerocost.json --split 2024-01-01`. Dollar thresholds are per
+SOL, ×1000 at 40 contracts.
+
+**How many signals to expect.** Not derivable from a random walk the way the
+SMA's flip count was: a 20-day close-channel break happens perhaps 15–25 times
+a year on SOL and a third to a half fail within two days, so roughly 6–12
+signals a year, 30–60 over the window. That is enough for the sign-flip null
+to say something and not enough to say much.
+
+**S0 — machinery gate.** `refusals.count == 0`; every entry is from flat and
+every exit to flat (`fills_off_target == 0`); commission and slippage
+reconcile to `3.41 × 2 × 40 × trades` and `ticks × 1.25 × 2 × 40 × trades`
+(two sides per trade, no flips); the zero-cost twin makes identical
+decisions; `detail_truncated == 0`. **If `trades.count < 15`, S1–S4 cannot be
+read: the outcome is recorded as TOO FEW SIGNALS, which is neither success
+nor kill.**
+
+**S1.** Total of `g3-fade-net3` > 0 per SOL. **S2.** Mean gross per closed
+trade ≥ +$1.15/SOL, twice the toll, with n ≥ 15. **S3.** Sign-flip
+`p_high < 0.05` on `g0`. **S4.** `g1` and `g2` zero-cost gross carry `g0`'s
+sign; downgrade only. **S5.** Both halves at `--split 2024-01-01` carry the
+whole window's sign; downgrade only.
+
+**C1 — is it a complement? (reported, not a criterion).** Monthly gross of
+`g0` against monthly gross of `f0-sma-zerocost` over the same window, each
+month's figure the sum of the gross of trades *closed* in that month. The
+reading is fixed now: correlation below +0.2 → a complement; above +0.5 → the
+same bet in different clothes, and the case for running both collapses
+whatever S1–S5 say. Computed from the two result files' `trades.detail`;
+tooling to follow the run, the threshold does not.
+
+**Kills.** **K1:** `p_high ≥ 0.95` — fading breaks on SOL is wrong-sided;
+the family ends. **K2:** zero-cost total ≤ −2 × trades × $0.573/SOL (two
+window-tolls, the §9 construction with the realised count). **K3:** `g3` ≤ 0
+and `g0` ≤ 0 — lost before costs and after. **K4:** `trades.count > 150` and
+zero-cost total ≤ 0 — a rule that fires every other week on a 20-day channel
+is reading noise as ranges.
+
+**Verdict map.** S0 passes and S1–S5 hold → SUCCESS *for a candidate*, not for
+deployment: a second sleeve joins the paper trial only after C1 says it is a
+complement and after §11 has not refuted the trend rule it is meant to
+complement. INCONCLUSIVE → stays registered and untouched. TOO FEW SIGNALS →
+re-test when twelve more months exist. Any kill → finished; no
+re-parameterisation. **Nothing here may be used to change `sol-sma`.**
+
+**Honesty notes.** Same spot-not-futures, same one-instrument, same window
+as §10, and this candidate was designed *after* seeing August 2026, which is
+exactly one month of the window it is tested on. The parameters are the
+published rule's and were not tuned, but the decision to build a fade rule
+at all was prompted by that month; the reader should discount accordingly.
+
+**Verdict:** _not yet run._

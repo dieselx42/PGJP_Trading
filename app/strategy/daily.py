@@ -145,6 +145,24 @@ def channel(
     return max(d.high for d in span), min(d.low for d in span)
 
 
+def close_channel(
+    days: Sequence[DailyBar], window: int, *, excluding_last: bool = True
+) -> tuple[Decimal, Decimal] | None:
+    """``(high, low)`` of the CLOSES over ``window`` days.
+
+    The same shape as :func:`channel` but on closes, for a rule that must not
+    read sampled highs and lows. ``excluding_last`` has the same meaning: a
+    breakout test needs the level from BEFORE the day being tested.
+    """
+    if window < 1:
+        return None
+    needed = window + 1 if excluding_last else window
+    if len(days) < needed:
+        return None
+    span = days[-(window + 1) : -1] if excluding_last else days[-window:]
+    return max(d.close for d in span), min(d.close for d in span)
+
+
 def mean_close(days: Sequence[DailyBar], window: int) -> Decimal | None:
     """Simple moving average of the last ``window`` daily closes."""
     if window < 1 or len(days) < window:
@@ -157,6 +175,7 @@ __all__ = [
     "DailyBar",
     "average_true_range",
     "channel",
+    "close_channel",
     "mean_close",
     "true_range",
 ]

@@ -126,6 +126,25 @@ Stays registered, no live money, no parameter change. §11 proposes the
 identical rule on BTC/ETH as the next test (correlated assets — not
 independent; combination rule must be written before running).
 
+**§11 REGISTERED — sol-sma on BTC/ETH (sign-flip only).** `scripts/cross_asset.sh
+--fresh --out /tmp/xa` after importing BTC-USD and ETH-USD (3 chunks each,
+commands in §11). Dollars meaningless (MSL metadata on BTC prices) — read
+only p and the split. SUPPORTED = both p<0.05 + halves agree; REFUTED = any
+p≥0.95 or both p>0.5. Correlated assets, not independent tests. Not yet run.
+
+**Candidate G — `sol-fade` (2026-09-20, PRE-REGISTERED §12, not yet run).**
+Turtle Soup on closes: close beyond 20-day close-channel, back inside within
+2 days → fade; stop = break extreme close, target = channel midpoint, 10-day
+time exit; prior extreme ≥4 days old. Params are the published rule's. A
+COMPLEMENT to sol-sma (earns in chop, stopped in breakouts); judged on its own
+S0–S5/K1–K4 plus C1 (monthly-gross correlation with f0 < 0.2 = complement,
+> 0.5 = same bet). Not adoptable on restart (levels from the break). Rows
+`g-fade`, `g0-fade-zerocost`, `g3-fade-net3` (PRIMARY), `g1/g2` sign-checks.
+Run: `scripts/strategy_compare.sh --fresh --only g --out /tmp/g -- --start
+2021-07-01 --end 2026-09-20 && scripts/sign_flip.py /tmp/g/g0-fade-zerocost.json
+--split 2024-01-01`. n<15 → TOO FEW SIGNALS, not a verdict. Designed after
+seeing Aug 2026, which is inside the window — discount accordingly.
+
 **Replay costs understate reality by 40%.** The fill model uses 1 tick of
 slippage ($9.32/contract round trip); the measured MSL spread is 5 ticks
 (~$13.08). Every net number in the comparison is optimistic by that factor.
