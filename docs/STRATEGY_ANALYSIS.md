@@ -497,4 +497,44 @@ the tradeable strategy. Survivorship: SOL is analysed because it is large now.
 The §9 year is inside the window. One rule, one instrument, one pre-registered
 run; a second look at any of it is a new section.
 
-**Verdict:** _not yet run._
+**Verdict (run 2026-09-20, 2021-07-01 → 2026-09-20, 40 contracts):
+INCONCLUSIVE — suggestive, not shown.**
+
+| criterion | result |
+|---|---|
+| S0 gate | **fails on one item:** `trades.count` = 102 < 110. Every other verifiable item passes exactly — `f3` costs 58,712 = 3.41×8,200 + 3×1.25×8,200; `f-sma` 38,212 = 3.41×8,200 + 1.25×8,200; zero-cost twin same 102 trades; open tail reported (+33,840 at `f3`); detail not truncated (103 segments tested). The bound was derived from random-walk crossing frequency (0.08/day); the realised 0.055/day is what a trending series produces and is not a machinery fault. Recorded as failed; the bound is **not** re-specified. |
+| S1 net at 3 ticks | holds: +302,387 (+$302/SOL), tail included |
+| S2 gross/segment ≥ +$1.15/SOL, n ≥ 110 | substance holds (+$3.51/SOL, 3× the floor); **fails on n** (103) |
+| S3 sign-flip p < 0.05 | **fails:** p_high = 0.0720 (200,000 draws, seed 20260919) |
+| S4 sign agreement | holds: `f0` +361,099, `f1` +233,966, `f2` +70,550 |
+| S5 split sign agreement | holds by sign: before 2024-01-01 +$329.35/SOL (n=41), after +$31.75/SOL (n=62) |
+| K1–K4 | none fire |
+
+At one contract: gross +$9,027, toll $1,468, net **+$7,560 over 5.2 years**
+(~$1,450/yr). That headline needs its split beside it: 91% of the gross is
+the 2021–23 half. The 2024–26 half made $0.51/SOL per segment, below the
+$0.573 toll — roughly −$80 net at one contract over 2.7 years. The rule
+earned in the big-trend phase and bled slowly in the other.
+
+Reading: not refuted, and closer to the line than anything measured in this
+project — but the bar was 0.05 and the result is 0.072, and the bar does not
+move. Per the map: INCONCLUSIVE. Stays registered, no parameter change, no
+live money. Re-test when twelve more months exist, or via §11.
+
+Also on the record, as observations for a future section and not as actions:
+the flip-rate prior (0.08/day) was a random-walk number and the market
+crossed its own average less often than that; and the concentration of the
+result in one cycle phase is exactly the regime dependence a trend rule is
+expected to have.
+
+## 11. Proposed next test — the same rule on other assets (not yet registered)
+
+The cheapest independent evidence for the *rule* — as opposed to for SOL —
+is to run it unchanged on BTC-USD and ETH-USD spot over the identical
+window with the identical §10 criteria. Nothing about the rule is SOL-
+specific. Before running it, two things have to be written down here: that
+the three assets are strongly correlated, so the same 2022 collapse drives
+all three and the three p-values are far from independent; and what
+combination rule will be applied (proposal: all three must individually
+clear S3, or the joint result is INCONCLUSIVE). Until that is written, this
+section is a proposal and no BTC or ETH run may be read against SOL's.

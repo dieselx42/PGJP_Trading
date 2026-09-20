@@ -116,7 +116,15 @@ name). **Five-year run PRE-REGISTERED in `STRATEGY_ANALYSIS.md` §10** (window
 `sign_flip.py --split 2024-01-01` sign agreement, downgrade-only). Import =
 three `bars-import` chunks (4,000-page ceiling ≈ 833 days each; commands in
 §10). `DETAIL_ROWS` raised 50→2,000 in `results.py` — `sign_flip.py` refuses a
-truncated list, so 50 would have been a hard stop at ~150 flips. Not yet run.
+truncated list, so 50 would have been a hard stop at ~150 flips. **5-YR VERDICT (2026-09-20): INCONCLUSIVE — suggestive.** 102 flips, gross
++$361/SOL, net +$302/SOL at 3 ticks (1 ct: +$7,560 over 5.2 yr ≈ $1,450/yr).
+Sign-flip **p = 0.072** vs the 0.05 bar → S3 fails. S0 fails on flip count
+(102 < 110; machinery reconciles exactly; the bound assumed a random walk —
+recorded, NOT re-specified). S1, S4, S5 hold. No kill. **91% of gross is
+2021–23**; 2024–26 half = $0.51/SOL/segment < $0.573 toll ≈ −$80 net at 1 ct.
+Stays registered, no live money, no parameter change. §11 proposes the
+identical rule on BTC/ETH as the next test (correlated assets — not
+independent; combination rule must be written before running).
 
 **Replay costs understate reality by 40%.** The fill model uses 1 tick of
 slippage ($9.32/contract round trip); the measured MSL spread is 5 ticks
