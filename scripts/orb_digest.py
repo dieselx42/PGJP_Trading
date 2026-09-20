@@ -46,12 +46,21 @@ def _money(raw: object) -> Decimal:
 
 def _row(name: str, doc: dict) -> dict:
     perf, trades = doc.get("performance", {}), doc.get("trades", {})
-    net = _money(perf.get("net_pnl"))
+    realized = _money(perf.get("net_pnl"))
+    # A rule that is always in the market ends the window with a position
+    # still open. The engine reports its mark-to-market separately as
+    # performance.final_unrealized and keeps it OUT of net_pnl; a digest that
+    # read net_pnl alone would silently drop that whole last segment, which
+    # for a trend rule can be most of the year. Rows that end flat carry 0
+    # here and are unchanged.
+    open_ = _money(perf.get("final_unrealized"))
+    net = realized + open_
     costs = _money(perf.get("commission_paid")) + _money(perf.get("slippage_paid"))
     win_rate = trades.get("win_rate")
     return {
         "name": name,
         "net": net,
+        "open": open_,
         # Gross is reconstructed rather than read: the report states net and
         # costs, and net+costs is the only definition of gross consistent
         # with both. Shown because "edge before costs" is the question E0 asks.
@@ -93,17 +102,27 @@ def main(argv: list[str]) -> int:
         base = rows[0]
 
     print("=" * WIDTH)
-    print(f"{'experiment':<26}{'net':>12}{'gross':>12}{'costs':>12}"
-          f"{'trades':>8}{'win%':>7}{'vs base':>13}")
+    print(
+        f"{'experiment':<26}{'net':>12}{'gross':>12}{'costs':>12}"
+        f"{'trades':>8}{'win%':>7}{'vs base':>13}"
+    )
     print("-" * WIDTH)
     for r in rows:
         win = "  n/a" if r["win_rate"] is None else f"{r['win_rate'] * 100:5.1f}"
         delta = ""
         if base is not None and r["name"] != BASELINE:
             delta = f"{r['net'] - base['net']:>+13,.0f}"
-        print(f"{r['name']:<26}{_fmt(r['net'])}{_fmt(r['gross'])}{_fmt(r['costs'])}"
-              f"{r['trades']:>8}{win:>7}{delta:>13}")
+        print(
+            f"{r['name']:<26}{_fmt(r['net'])}{_fmt(r['gross'])}{_fmt(r['costs'])}"
+            f"{r['trades']:>8}{win:>7}{delta:>13}"
+        )
     print("=" * WIDTH)
+    if open_rows := [r for r in rows if r["open"]]:
+        # Said out loud so nobody compares an always-in row's net with a
+        # flat-ending row's and forgets that one of them is a mark, not a fill.
+        print("open position at window end (marked to the last bar; included in net and gross):")
+        for r in open_rows:
+            print(f"  {r['name']:<26}{_fmt(r['open'])}")
 
     # The attribution is the point of the exercise, so it is printed in full
     # for the baseline rather than summarised into the table above.
@@ -116,10 +135,12 @@ def main(argv: list[str]) -> int:
             for b in buckets:
                 share = b.get("share_of_net")
                 share_txt = "     n/a" if share is None else f"{share * 100:7.1f}%"
-                print(f"  {b['bucket']!s:<22}"
-                      f"n={b['count']:<6}wins={b['wins']:<6}"
-                      f"net={_money(b['net']):>12,.0f}"
-                      f"  avg={_money(b['avg_net']):>9,.0f}  {share_txt}")
+                print(
+                    f"  {b['bucket']!s:<22}"
+                    f"n={b['count']:<6}wins={b['wins']:<6}"
+                    f"net={_money(b['net']):>12,.0f}"
+                    f"  avg={_money(b['avg_net']):>9,.0f}  {share_txt}"
+                )
         counters = docs[baseline_key].get("strategy", {}).get("counters", {})
         # Zero-valued counters are dropped: a dozen zeroes bury the two or
         # three numbers that explain why the strategy traded less than the

@@ -92,6 +92,20 @@ Design constraint for future entries: the cost term is smallest at a wide
 target ($4–6 → 8–11 pts, vs 19–23 pts at $1.50–2.00). Any new signal needs
 roughly 10+ pts of genuine edge, and is cheapest to harvest on big moves.
 
+**Candidate F — `sol-sma` (2026-09-20, design panel, PRE-REGISTERED, not yet
+run).** Close vs 50-day SMA of daily closes: long above, short below, always
+in, flip only, one parameter. Chosen from five independent proposals by three
+comparative judges (tied with weekly 4-week TSMOM; won on n — ~25 flips/yr vs
+~12 gives the sign-flip test power in one year). Toll at 1 ct ≈ $327–358/yr
+for ~25 flips, ~13% of gross SD; ORB paid $1,372 for 105. Success/kill
+criteria fixed in `docs/STRATEGY_ANALYSIS.md` §9 BEFORE any replay — do not
+move them after a number is seen. Team doc: `docs/STRATEGY_SMA.md`. Rows
+`f-sma`, `f0-sma-zerocost`, `f3-sma-net3` (PRIMARY), `f1/f2` sign-checks,
+`f4/f5` K3 rows in `strategy_compare.sh`. `scripts/sign_flip.py` on the
+`f0` JSON is the decisive test (S3: p<0.05; K1: p≥0.95). The digest now adds
+`performance.final_unrealized` to net/gross — always-in rows end open.
+Run: `scripts/strategy_compare.sh --fresh --out /tmp/f && scripts/sign_flip.py /tmp/f/f0-sma-zerocost.json`.
+
 **Replay costs understate reality by 40%.** The fill model uses 1 tick of
 slippage ($9.32/contract round trip); the measured MSL spread is 5 ticks
 (~$13.08). Every net number in the comparison is optimistic by that factor.

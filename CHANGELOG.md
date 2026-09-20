@@ -7,6 +7,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `app/strategy/sma.py` (`sol-sma`) — close versus its 50-day simple moving
+  average: long above, short below, always in, flip only. One parameter. The
+  candidate chosen by a five-lens design panel and three comparative judges
+  after the target sweep showed the opening-range entry tracks a random walk
+  at every geometry. Its success and kill criteria are pre-registered in
+  `docs/STRATEGY_ANALYSIS.md` §9 before any replay; see `docs/STRATEGY_SMA.md`.
+- `scripts/sign_flip.py` — the sign-flip null from `STRATEGY_ANALYSIS.md` §7:
+  keep the rule's own segments, randomise only their direction, and report
+  where the real result sits in that distribution. The one test with power
+  at a year of data.
+- `performance.final_unrealized` in the backtest report — the mark of a
+  position still open when the window ends, kept out of `net_pnl` and
+  reported beside it. `scripts/orb_digest.py` now adds it to `net` and
+  `gross` and names every row that carries one, so an always-in rule's last
+  segment is no longer silently dropped from the table.
+
 - `app/broker/checkout.py` and `app.cli ibkr-checkout` — a read-only checkout of
   a real IB Gateway session. Every socket path in the IBKR adapter was
   unverified: the unit tests around it drive fakes because there has never been

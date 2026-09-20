@@ -107,6 +107,43 @@ class TestHeadline:
         assert report.net_pnl == Decimal("100"), "not deducted twice"
 
 
+class TestFinalUnrealized:
+    """The open position's mark, reported so an always-in rule is not read
+    on a headline that leaves its last segment out."""
+
+    def test_is_the_last_equity_point_less_the_realised_net(self) -> None:
+        """Realised 100, commission 6.82, so the realised net is 93.18. The
+        curve ends at -40: the difference, -133.18, is what the open position
+        is marked at, and nothing else can be."""
+        report = build_report(
+            _run(
+                equity_curve=((T.format(0), Decimal("10")), (T.format(1), Decimal("-40"))),
+                realized_pnl=Decimal("100"),
+                commission_paid=Decimal("6.82"),
+                final_position=1,
+            )
+        )
+        assert report.final_unrealized == Decimal("-133.18")
+        assert report.net_pnl == Decimal("93.18"), "not folded into the headline"
+        assert report.describe()["performance"]["final_unrealized"] == "-133.18"  # type: ignore[index]
+
+    def test_zero_when_nothing_was_replayed(self) -> None:
+        assert build_report(_run()).final_unrealized == Decimal(0)
+
+    def test_a_flat_ending_marks_nothing(self) -> None:
+        curve = ((T.format(0), Decimal("50")), (T.format(1), Decimal("93.18")))
+        report = build_report(
+            _run(equity_curve=curve, realized_pnl=Decimal("100"), commission_paid=Decimal("6.82"))
+        )
+        assert report.final_unrealized == Decimal(0)
+
+    def test_the_open_position_limitation_points_at_the_figure(self) -> None:
+        notes = build_report(_run(final_position=2)).describe()["limitations"]
+
+        assert isinstance(notes, list)
+        assert any("final_unrealized" in note for note in notes)
+
+
 class TestDrawdown:
     def test_largest_peak_to_trough_fall(self) -> None:
         curve = [Decimal(v) for v in (0, 100, 40, 60, 10)]

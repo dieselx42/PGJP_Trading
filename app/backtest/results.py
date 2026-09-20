@@ -49,6 +49,16 @@ class BacktestReport:
     slippage_paid: Decimal
     max_drawdown: Decimal
     sharpe: float | None
+    final_unrealized: Decimal
+    """Unrealised P&L of whatever the replay ended holding, at the last close.
+
+    ``net_pnl`` is realised only, so a rule that is always in the market --
+    sol-hold, sol-sma -- leaves its final segment out of the headline. That
+    segment is worth roughly a month of exposure over a one-year replay, a
+    systematic truncation that would otherwise be misread as performance.
+    Reported beside ``net_pnl`` rather than folded into it: the one is money,
+    the other is a mark.
+    """
 
     # -- trades --------------------------------------------------------
     trade_count: int
@@ -84,6 +94,7 @@ class BacktestReport:
                 "commission_paid": str(self.commission_paid),
                 "slippage_paid": str(self.slippage_paid),
                 "max_drawdown": str(self.max_drawdown),
+                "final_unrealized": str(self.final_unrealized),
                 "sharpe": self.sharpe,
                 "sharpe_basis": f"{_BARS_PER_YEAR.get(run.interval, 0)} bars per year",
             },
@@ -238,7 +249,9 @@ def _limitations(run: BacktestRun) -> list[str]:
     if run.final_position != 0:
         notes.append(
             f"The replay ended holding {run.final_position} contract(s). That position is "
-            "marked to the last close and never actually exited, so its P&L is unrealised."
+            "marked to the last close and never actually exited, so its P&L is unrealised: "
+            "it is reported as performance.final_unrealized and is NOT in net_pnl. For a "
+            "rule that is always in the market, read net_pnl + final_unrealized."
         )
     return notes
 
@@ -256,6 +269,7 @@ def build_report(run: BacktestRun) -> BacktestReport:
         slippage_paid=run.slippage_paid,
         max_drawdown=_max_drawdown(equity),
         sharpe=_sharpe(equity, interval=run.interval),
+        final_unrealized=_final_unrealized(run),
         trade_count=len(run.trades),
         win_count=len(wins),
         loss_count=len(losses),
@@ -268,6 +282,19 @@ def build_report(run: BacktestRun) -> BacktestReport:
         refusal_count=len(run.refusals),
         refusals_by_reason=_by_reason(run),
     )
+
+
+def _final_unrealized(run: BacktestRun) -> Decimal:
+    """The open position's mark at the last bar.
+
+    The last equity point is ``realized + unrealized(last close) - commission``
+    by construction (see ``_Book.equity``), so subtracting the realised net
+    leaves exactly the unrealised part. Zero when the replay ended flat or
+    saw no bars.
+    """
+    if not run.equity_curve:
+        return Decimal(0)
+    return run.equity_curve[-1][1] - (run.realized_pnl - run.commission_paid)
 
 
 def _max_drawdown(equity: list[Decimal]) -> Decimal:

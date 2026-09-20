@@ -114,6 +114,40 @@ BIG_RANGE="position_contracts=40,min_orb_range=3.00,stop_distance=2.00,target_di
 BRACKET="position_contracts=40,stop_distance=1.00,target_distance=2.00,max_trades_per_session=1,breakeven_enabled=false,trail_enabled=false"
 NY_ONLY="--sessions 09:30@America/New_York"
 
+# Candidate F is the simplest thing in the table and different in kind from
+# every other row: not a trade with a lifecycle but a position TARGET. Once a
+# day, the completed UTC close against its 50-day simple moving average --
+# above, hold long; below, hold short; never flat after warm-up; no stop, no
+# target, no trail. One parameter, fixed before any replay ran (the horizon
+# and the ~25 flips a year a random walk produces are the reasons, not a
+# result), and a non-quant can check the position by eye on any chart.
+#
+# A change of side is ONE order of 2 x size (long 40 -> short 40 is an
+# 80-lot), so every F row carries --max-order-size 80 AFTER the COMMON limits
+# -- argparse keeps the last value, so 80 wins over COMMON's 40 without
+# loosening any other row. The notional limit is checked on the projected
+# position (40 x 25 x price), so COMMON's 500000 refuses only above $500/SOL;
+# refusals.count == 0 is the check, and if the store's prices ever exceed
+# that, add --max-notional 2000000 to the F rows.
+#
+# The rows are read in a fixed order written down BEFORE they ran (the
+# pre-registration in app/strategy/sma.py and docs/STRATEGY_ANALYSIS.md §9):
+#   f3-sma-net3     the PRIMARY cost bracket (3 ticks/side) for every net
+#                   criterion;
+#   f0-sma-zerocost the gross-edge row and the input to scripts/sign_flip.py;
+#   f-sma           the 1-tick row, reported for continuity with the other
+#                   rows only;
+#   f1/f2           the halved and doubled window at zero cost, read ONLY for
+#                   whether the SIGN of their gross agrees with f0's -- they
+#                   may never move sma_days, and disagreement can only
+#                   downgrade a success to inconclusive;
+#   f4/f5           the same two windows at 3 ticks, for the one kill that
+#                   asks whether the whole window family lost after costs.
+# An always-in rule's last segment is open when the replay ends, so every F
+# row is read on net_pnl + performance.final_unrealized, never on net alone.
+SMA="position_contracts=40"
+SMA_ORDER="--max-order-size 80"
+
 # name|description|strategy flags
 RUNS=(
   "z-hold-benchmark|BENCHMARK: passive long, rolled quarterly|--strategy sol-hold --strategy-params position_contracts=40"
@@ -130,6 +164,13 @@ RUNS=(
   "d-bracket|Candidate D: NY only, 1/day, plain \$1/\$2 bracket|--strategy sol-orb $NY_ONLY --strategy-params $BRACKET"
   "d0-bracket-zerocost|Candidate D raw edge|--strategy sol-orb $NY_ONLY --strategy-params $BRACKET ${ZEROCOST[*]}"
   "d1-bracket-both-sessions|Candidate D with London back on|--strategy sol-orb --strategy-params $BRACKET"
+  "f-sma|Candidate F: close vs 50-day SMA, long/short always in, 1-tick costs|--strategy sol-sma --strategy-params $SMA $SMA_ORDER"
+  "f0-sma-zerocost|Candidate F raw edge (sign-flip input)|--strategy sol-sma --strategy-params $SMA $SMA_ORDER ${ZEROCOST[*]}"
+  "f3-sma-net3|Candidate F at the pessimistic 3-tick bracket (PRIMARY for S1/K3)|--strategy sol-sma --strategy-params $SMA $SMA_ORDER --slippage-ticks 3"
+  "f1-sma25-signcheck|Candidate F halved window, SIGN AGREEMENT ONLY, may not change sma_days|--strategy sol-sma --strategy-params $SMA,sma_days=25 $SMA_ORDER ${ZEROCOST[*]}"
+  "f2-sma100-signcheck|Candidate F doubled window, SIGN AGREEMENT ONLY, may not change sma_days|--strategy sol-sma --strategy-params $SMA,sma_days=100 $SMA_ORDER ${ZEROCOST[*]}"
+  "f4-sma25-net3|Candidate F halved window at 3 ticks (K3 only)|--strategy sol-sma --strategy-params $SMA,sma_days=25 $SMA_ORDER --slippage-ticks 3"
+  "f5-sma100-net3|Candidate F doubled window at 3 ticks (K3 only)|--strategy sol-sma --strategy-params $SMA,sma_days=100 $SMA_ORDER --slippage-ticks 3"
 )
 
 echo "writing to $OUT" >&2
@@ -137,14 +178,14 @@ for row in "${RUNS[@]}"; do
   IFS='|' read -r name desc flags <<<"$row"
   echo "--- $name: $desc" >&2
   # --sessions is an ORB-only diagnostic (the CLI injects it as a strategy
-  # param, and sol-trend -- a 24/7 daily system -- rightly refuses it), so
-  # strip it from the extras for trend runs instead of failing them.
+  # param, and sol-trend and sol-sma -- 24/7 daily systems -- rightly refuse
+  # it), so strip it from the extras for those runs instead of failing them.
   RUN_EXTRA=()
   skip_next=0
   for arg in ${EXTRA[@]+"${EXTRA[@]}"}; do
     if [[ $skip_next -eq 1 ]]; then skip_next=0; continue; fi
-    if [[ "$flags" == *sol-trend* && "$arg" == --sessions ]]; then skip_next=1; continue; fi
-    if [[ "$flags" == *sol-trend* && "$arg" == --sessions=* ]]; then continue; fi
+    if [[ ( "$flags" == *sol-trend* || "$flags" == *sol-sma* ) && "$arg" == --sessions ]]; then skip_next=1; continue; fi
+    if [[ ( "$flags" == *sol-trend* || "$flags" == *sol-sma* ) && "$arg" == --sessions=* ]]; then continue; fi
     RUN_EXTRA+=("$arg")
   done
   # shellcheck disable=SC2086

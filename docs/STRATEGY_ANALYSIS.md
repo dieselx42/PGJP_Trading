@@ -238,3 +238,125 @@ per unit of effort:
   reading of the evidence is that intraday breakout on SOL has no edge at
   these costs, that longer-horizon trend is not yet refuted, and that passive
   exposure is the bar to beat.
+
+## 9. Candidate F (`sol-sma`) — pre-registration, written before any replay
+
+Everything in this section was fixed before `scripts/strategy_compare.sh` ran
+the `f` rows. Nothing below may be edited after a number has been seen; a
+different window, cadence, band, direction mode or exit is a new candidate
+with a new name and its own section.
+
+**The rule, in one sentence.** Every day at 00:00 UTC compare yesterday's
+completed daily close with the 50-day simple moving average of daily closes:
+above the line hold one contract long, below it hold one contract short, flip
+at the open of the next minute when the side changes, and otherwise do
+nothing — no stop, no target, no trail, never flat after warm-up. The full
+rule, every ambiguity resolved, is the module docstring of
+`app/strategy/sma.py`.
+
+**Why 50, and why it may not move.** Close minus SMA(N) weights the last N−1
+daily returns linearly with a centre of mass near N/3 days, so 50 sits at
+~17 days, inside the 1–4 week horizon where time-series momentum in crypto is
+documented (Liu & Tsyvinski 2021; Detzel et al. 2021). On a driftless random
+walk the sign of close − SMA(50) changes ~0.08 times a day, ~25 flips in the
+~315 post-warm-up days of a one-year replay — inside the 15–100 band where
+the sign-flip null below has power (100 days gives ~15 flips, 200 gives ~6,
+20 gives ~43). The 50-day line is drawn by default on every chart, so a
+non-quant checks the position by eye. Expected toll: ~25 × $0.573/SOL ≈
+$14.3/SOL/yr, ~0.13 of the rule's annual gross standard deviation.
+
+**Why long/short and always in.** The published TSMOM rules are long/short; a
+symmetric always-in rule has expected gross exactly zero on a martingale, so
+its coin-flip line is zero and the sign-flip null is clean. A long/flat rule's
+null is the drift share while long, and in a year SOL is known to have fallen
+it beats `sol-hold` by construction. The accepted price is momentum-crash
+exposure on the short leg with no stop, which is why the live size is 1.
+
+**The runs** (all `--session all`, harness COMMON limits, `--max-order-size 80`
+because a flip at 40 contracts is one 80-lot order; every threshold is per
+SOL, ×1000 at 40 contracts; "total" always means
+`net_pnl + performance.final_unrealized`):
+
+| row | cost model | read for |
+|---|---|---|
+| `f3-sma-net3` | 3 ticks/side, $3.41/side | **primary** for S1 and K3 |
+| `f0-sma-zerocost` | none | S2, S3, K1, K2, K4; input to `scripts/sign_flip.py` |
+| `f-sma` | 1 tick/side | continuity with the other rows only |
+| `f1-sma25-signcheck`, `f2-sma100-signcheck` | none | S4, the SIGN of gross only |
+| `f4-sma25-net3`, `f5-sma100-net3` | 3 ticks/side | K3 only |
+
+**S0 — machinery gate** (must all hold before any P&L is read; a failure is
+fixed and re-run, it is not evidence either way): `refusals.count == 0`;
+`12 <= trades.count <= 45`; `counters.days_in_warmup == 49` (the 50th
+completed day is the first decision); `targets_long + targets_short == flips
++ 1`; `orders_reemitted <= 5%` of `orders_emitted`; `fills_off_target == 0`;
+`final_position` is ±40 and `limitations` flags it; `commission_paid == 3.41 ×
+(40 + 80 × flips)` and `slippage_paid == slippage_ticks × 1.25 × (40 + 80 ×
+flips)`; the zero-cost twin has the same `trades.count` and identical
+`opened_at`/`closed_at` per trade; `trades.detail_truncated == 0`.
+
+**S1 — net at the pessimistic bracket.** Total of `f3-sma-net3` > 0 per SOL.
+Total versus `z-hold-benchmark` is reported but is *not* a criterion (subtract
+4 × $0.573/SOL for the four unmodelled rolls if it is quoted).
+
+**S2 — edge over the coin-flip line.** From `f0-sma-zerocost`, mean gross per
+segment (closed trades plus the open final segment, each `gross / (25 ×
+quantity)`) ≥ +$1.15/SOL, twice the toll, with n ≥ 15. Necessary only: its
+standard error is ~$3.5–4.5/SOL.
+
+**S3 — sign-flip null** (the only criterion with power). `p_high < 0.05` from
+`scripts/sign_flip.py strategy-compare/f0-sma-zerocost.json` with n ≥ 15:
+G = Σ per-segment gross, G* = Σ sᵢ·grossᵢ over equiprobable signs, all 2ⁿ
+configurations when n ≤ 30, else 200,000 draws from seed 20260919, p = share
+with G* ≥ G. Costs are identical under every sign assignment, so p on gross is
+p on net. Segment boundaries depend on the realised sign, so it is
+approximate; that caveat travels with the number.
+
+**S4 — sign agreement** (can only downgrade). The zero-cost gross total of
+`f1` and `f2` has the same sign as `f0`'s. Disagreement turns SUCCESS into
+INCONCLUSIVE; agreement adds nothing; neither row may change `sma_days`.
+
+**Not criteria:** win rate (null prediction 0.18–0.30; anything in 0.10–0.60
+is uninformative), drawdown at 40 contracts, the per-minute Sharpe, the
+1-tick row.
+
+**Kill criteria.**
+- **K1 wrong side:** `p_high ≥ 0.95` with n ≥ 15. Ends the whole
+  close-versus-average family on this data.
+- **K2 lost twice its cost budget before costs:** zero-cost total ≤
+  −$28.60/SOL. Fires in ~40% of null years and ~27% of published-strength
+  years; that is the price of having a kill on one year.
+- **K3 the whole window family lost after costs:** the 3-tick total ≤ 0 for
+  all of `f3`, `f4`, `f5`.
+- **K4 chop:** `trades.count > 45` and zero-cost total ≤ 0. Ends the
+  candidate; it is not re-cadenced.
+- **K5 replay-vs-live parity** (live trial): disabled by reconcile mismatch
+  more than twice in 26 weeks, or any operator override of a live order.
+- **K6 execution cost** (live trial): average realised round trip over the
+  first 10 live flips > $20 per contract (1.4× the $14.32 bracket).
+- **K7 capital control** (live trial): cumulative live net at 1 contract ≤
+  −$1,500 at any point.
+
+**Verdict map.** S0 passes and S1–S4 all hold → SUCCESS: a pre-registered
+26-week live trial at 1 contract (`STRATEGY_POSITION_CONTRACTS=1`,
+`MAX_ORDER_SIZE ≥ 2`), paper-armed through the 50-day live warm-up, whose
+purpose is to measure execution cost, not to re-test the edge. S0 passes, no
+kill fires, S1–S4 not all met → INCONCLUSIVE: the candidate stays registered
+and untouched, no live money, the identical criteria re-applied once six more
+months of bars exist. Any kill → KILLED, no re-parameterisation.
+
+**Run protocol.** (1) `scripts/strategy_compare.sh --out ./strategy-compare`.
+(2) Read S0 only; fix and re-run on any failure. (3)
+`python3 scripts/sign_flip.py strategy-compare/f0-sma-zerocost.json`. (4)
+Apply S1–S4 and K1–K4 exactly as written and record the verdict here, with
+the numbers, before anyone looks at `f1`/`f2` for anything but sign. (5)
+Nothing in the `f` rows may be re-run with a changed parameter.
+
+**Known replay-vs-live divergence.** The replay's days are 24/7 UTC days on
+spot; live, no bars arrive while CME is closed, so Friday completes on the
+first Sunday-evening bar, Saturday does not exist as a day, and the 50-day
+average spans ~8.3 calendar weeks instead of ~7.1. A `cme-crypto` session
+filter for the replay is the engine follow-up that would close this; it is
+an additional pessimistic row, never a parameter choice.
+
+**Verdict:** _not yet run._

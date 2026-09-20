@@ -53,6 +53,7 @@ def _registry() -> dict[str, type[Strategy]]:
     from app.strategy.hold import SolHoldStrategy  # noqa: PLC0415
     from app.strategy.momentum import SolMomentumStrategy  # noqa: PLC0415
     from app.strategy.orb import SolOrbStrategy  # noqa: PLC0415
+    from app.strategy.sma import SolSmaStrategy  # noqa: PLC0415
     from app.strategy.trend import SolTrendStrategy  # noqa: PLC0415
 
     return {
@@ -60,6 +61,7 @@ def _registry() -> dict[str, type[Strategy]]:
         SolHoldStrategy.name: SolHoldStrategy,
         SolMomentumStrategy.name: SolMomentumStrategy,
         SolOrbStrategy.name: SolOrbStrategy,
+        SolSmaStrategy.name: SolSmaStrategy,
         SolTrendStrategy.name: SolTrendStrategy,
     }
 
