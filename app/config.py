@@ -346,6 +346,11 @@ class Config:
     #: at 1 contract; each strategy decides what overrides it will accept (the
     #: ORB strategy refuses anything above its documented 40).
     strategy_position_contracts: int = 0
+    #: Where a daily strategy's warm-up is filled from on a cold start: the
+    #: stored spot series the replays ran on. Empty disables the spot fill;
+    #: live days written by the bot itself are always used.
+    strategy_seed_source: str = "coinbase"
+    strategy_seed_symbol: str = "SOL-USD"
 
     # -- storage ----------------------------------------------------------
     database_path: Path = Path("/app/data/trading.db")
@@ -410,6 +415,8 @@ class Config:
             "STRATEGY_NAME": self.strategy_name,
             "STRATEGY_ENABLED": self.strategy_enabled,
             "STRATEGY_POSITION_CONTRACTS": self.strategy_position_contracts,
+            "STRATEGY_SEED_SOURCE": self.strategy_seed_source,
+            "STRATEGY_SEED_SYMBOL": self.strategy_seed_symbol,
             "DATABASE_PATH": str(self.database_path),
             "LOG_DIR": str(self.log_dir),
             "LOG_LEVEL": self.log_level,
@@ -483,6 +490,8 @@ class Config:
             strategy_position_contracts=parse_int(
                 source, "STRATEGY_POSITION_CONTRACTS", 0, minimum=0
             ),
+            strategy_seed_source=parse_str(source, "STRATEGY_SEED_SOURCE", "coinbase").strip(),
+            strategy_seed_symbol=parse_str(source, "STRATEGY_SEED_SYMBOL", "SOL-USD").strip(),
             database_path=Path(parse_str(source, "DATABASE_PATH", "/app/data/trading.db")),
             log_dir=Path(parse_str(source, "LOG_DIR", "/app/logs")),
             log_level=log_level,

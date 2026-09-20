@@ -566,9 +566,7 @@ class SolMomentumStrategy(BarStrategy):
             },
             "cost_gate": {
                 "cost_per_sol_round_trip": str(COST_PER_SOL_ROUND_TRIP),
-                "min_stop_per_sol": str(
-                    self._p.min_stop_cost_multiple * COST_PER_SOL_ROUND_TRIP
-                ),
+                "min_stop_per_sol": str(self._p.min_stop_cost_multiple * COST_PER_SOL_ROUND_TRIP),
                 "note": (
                     "an entry is refused unless its stop distance is at least this far, so "
                     "the round trip is a bounded fraction of what the trade risks"

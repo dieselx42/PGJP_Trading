@@ -21,7 +21,7 @@ import contextlib
 import signal
 import sys
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from app.backtest.models import Bar
@@ -33,7 +33,7 @@ from app.broker.models import (
     BrokerFill,
     BrokerPermissionError,
 )
-from app.config import Config, ConfigError
+from app.config import Config, ConfigError, RiskLimits
 from app.contracts.models import QualifiedContract
 from app.contracts.resolver import ContractResolutionError, ContractResolver
 from app.enums import (
@@ -69,6 +69,7 @@ from app.state.database import Database
 from app.state.models import BotEvent, BrokerEvent, SignalRecord
 from app.state.repositories import Repositories
 from app.strategy.base import BarStrategy, Strategy
+from app.strategy.daily import DailyBar
 from app.strategy.noop import build_strategy
 from app.utilities.ids import new_correlation_id, new_run_id
 from app.utilities.timeutils import eastern_display, utc_now
@@ -84,6 +85,22 @@ _MAX_PENDING_BARS = 180
 STATE_KEY_LAST_STATE = "last_application_state"
 STATE_KEY_LAST_RUN_ID = "last_run_id"
 STATE_KEY_LAST_SHUTDOWN = "last_shutdown_at"
+
+
+def _check_order_size_fits(strategy: Strategy, limits: RiskLimits) -> None:
+    """Refuse to start a strategy whose own rule cannot get through the risk ceiling.
+
+    Only a configured ceiling is compared: an unconfigured one (0) is already
+    refused loudly by the risk manager on every order, which is the posture
+    the safety design wants and nothing here should pre-empt.
+    """
+    needed = strategy.required_order_size
+    if needed and 0 < limits.max_order_size < needed:
+        raise ConfigError(
+            f"{strategy.name} needs MAX_ORDER_SIZE >= {needed} (a flip is one order of "
+            f"twice the position) but it is {limits.max_order_size}; every flip would be "
+            "refused and the strategy would sit on the wrong side re-emitting it"
+        )
 
 
 class TradingApplication:
@@ -157,6 +174,7 @@ class TradingApplication:
         self._started_at = utc_now()
         #: Present exactly when the strategy consumes bars. Built in startup.
         self.bar_builder: BarBuilder | None = None
+        self._strategy_position_adopted = False
         #: Bars completed but not yet fed to the strategy, because feeding one
         #: requires a successful fills poll first. See `_tick`.
         self._pending_bars: list[Bar] = []
@@ -199,6 +217,7 @@ class TradingApplication:
             # the strategy's own default would silently trade 40x the size the
             # operator asked for.
             raise ConfigError(f"strategy configuration rejected: {exc}") from exc
+        _check_order_size_fits(self.strategy, self.config.risk)
         if isinstance(self.strategy, BarStrategy):
             # Bar strategies are fed from the tick-to-bar builder: quotes are
             # sampled into 1-minute bars and only COMPLETED bars reach the
@@ -213,6 +232,8 @@ class TradingApplication:
                     "interval": "1m",
                 },
             )
+            self._seed_daily_history(self.strategy)
+            self.strategy.on_day_completed = self._persist_daily_close
         self.validator = SignalValidator(
             configured_symbol=self.config.default_futures_symbol,
             known_strategies=[self.strategy.name],
@@ -876,6 +897,102 @@ class TradingApplication:
             self._notify_strategy_of_fill(broker_fill)
         return applied
 
+    def _seed_daily_history(self, strategy: BarStrategy) -> None:
+        """Hand a daily strategy the completed days it would otherwise wait for.
+
+        Live days the bot wrote itself come first; the stored spot series
+        fills whatever is older. Every failure here is logged and swallowed:
+        a strategy that starts cold and warms up over 50 days is slow, but a
+        process that refuses to start because its seed query failed is down.
+        """
+        want = strategy.daily_seed_days
+        if want <= 0:
+            return
+        from app.backtest.store import BarRepository  # noqa: PLC0415
+        from app.strategy.seed import (  # noqa: PLC0415
+            LIVE_DAILY_SOURCE,
+            assemble_daily_seed,
+            describe_seed,
+        )
+
+        symbol = self.config.default_futures_symbol
+        try:
+            store = BarRepository(self.database)
+            live = store.load(source=LIVE_DAILY_SOURCE, symbol=symbol, interval="1d")
+            spot: list[tuple[date, Decimal]] = []
+            if self.config.strategy_seed_source and self.config.strategy_seed_symbol:
+                # A little more than `want` days back: gaps in the spot series
+                # would otherwise leave the seed short.
+                since = utc_now() - timedelta(days=want + 14)
+                spot = store.daily_closes(
+                    source=self.config.strategy_seed_source,
+                    symbol=self.config.strategy_seed_symbol,
+                    interval="1m",
+                    start=since,
+                )
+            bars = assemble_daily_seed(
+                live_days=live,
+                spot_closes=spot,
+                want=want,
+                spot_source=self.config.strategy_seed_source or "spot",
+                spot_symbol=self.config.strategy_seed_symbol or symbol,
+            )
+            fed = strategy.seed(bars)
+        except Exception as exc:  # noqa: BLE001 - never let the seed stop the start
+            _LOG.error(
+                "daily seed failed; the strategy will warm up from live bars only",
+                extra={
+                    "event": "strategy.seed_failed",
+                    "strategy": strategy.name,
+                    "error": str(exc),
+                },
+            )
+            return
+        _LOG.info(
+            "daily history seeded",
+            extra={
+                "event": "strategy.seeded",
+                "strategy": strategy.name,
+                "wanted": want,
+                "fed": fed,
+                **describe_seed(bars),
+            },
+        )
+        if fed < want:
+            _LOG.warning(
+                "seed is short of the window; the first decision waits for live days",
+                extra={"event": "strategy.seed_short", "wanted": want, "fed": fed},
+            )
+
+    def _persist_daily_close(self, completed: DailyBar) -> None:
+        """Write a completed live day so the next start does not forget it."""
+        from app.backtest.store import BarRepository  # noqa: PLC0415
+        from app.strategy.seed import LIVE_DAILY_SOURCE, daily_bar  # noqa: PLC0415
+
+        try:
+            BarRepository(self.database).insert_many(
+                [
+                    daily_bar(
+                        source=LIVE_DAILY_SOURCE,
+                        symbol=self.config.default_futures_symbol,
+                        day=completed.day,
+                        close=completed.close,
+                        open_=completed.open,
+                        high=completed.high,
+                        low=completed.low,
+                    )
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed write must not stop trading
+            _LOG.error(
+                "could not persist the completed day",
+                extra={
+                    "event": "strategy.day_persist_failed",
+                    "day": completed.day.isoformat(),
+                    "error": str(exc),
+                },
+            )
+
     def _check_strategy_position_agrees(self) -> None:
         """Disable a strategy whose belief about its position is wrong.
 
@@ -897,6 +1014,13 @@ class TradingApplication:
         if strategy is None or not strategy.enabled or self.contract is None:
             return
         book_position = self.position_book.quantity(self.contract.con_id)
+        if not self._strategy_position_adopted:
+            # Once per run, at the first moment the book is known to be true:
+            # a strategy that can carry a position it did not open (a state
+            # rule) takes it here; one that cannot leaves the default no-op
+            # and falls through to the mismatch check exactly as before.
+            self._strategy_position_adopted = True
+            strategy.adopt_position(book_position)
         if book_position == strategy.position:
             return
         reason = (

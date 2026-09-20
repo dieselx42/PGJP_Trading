@@ -560,3 +560,66 @@ class TestParams:
         assert isinstance(counters, dict)
         assert set(counters) == COUNTERS
         assert all(value == 0 for value in counters.values())
+
+
+class TestSeeding:
+    """A restart hands the rule its missed days; it builds state and says nothing."""
+
+    @staticmethod
+    def _seed_bars(closes: Sequence[str]) -> list[Bar]:
+        from app.strategy.seed import daily_bar
+
+        return [
+            daily_bar(
+                source="coinbase",
+                symbol="SOL-USD",
+                day=(BASE + timedelta(days=i)).date(),
+                close=Decimal(c),
+            )
+            for i, c in enumerate(closes)
+        ]
+
+    def test_seeding_builds_the_window_and_emits_nothing(self) -> None:
+        strategy = _strategy()
+        assert strategy.seed(self._seed_bars(["100", "100", "103"])) == 3
+        assert not strategy.seeding
+        c = _counters(strategy)
+        assert c["days_completed"] == 2, "the third seeded day is still in progress"
+        assert c["days_in_warmup"] == 2
+        assert c["orders_emitted"] == 0, "seeding asks for nothing"
+        # The first LIVE bar, on day 3, completes day 2: the window is full,
+        # 103 > mean(100, 100, 103) = 101, and the entry goes out at once.
+        [intent] = _feed(strategy, [_day_bar(3, close="103")])
+        assert intent.requested_position == 40
+        assert _counters(strategy)["orders_emitted"] == 1
+
+    def test_the_day_hook_is_silent_while_seeding_and_fires_live(self) -> None:
+        strategy = _strategy()
+        seen: list = []
+        strategy.on_day_completed = seen.append
+        strategy.seed(self._seed_bars(["100", "100", "103"]))
+        assert seen == [], "seeded days are already in storage"
+        _feed(strategy, [_day_bar(3, close="103")])
+        assert [d.day for d in seen] == [(BASE + timedelta(days=2)).date()]
+        assert seen[0].close == Decimal("103")
+
+    def test_adopting_a_matching_position_asks_for_nothing(self) -> None:
+        strategy = _strategy()
+        strategy.seed(self._seed_bars(["100", "100", "103"]))
+        strategy.adopt_position(40)
+        assert strategy.position == 40
+        assert _feed(strategy, [_day_bar(3, close="103")]) == []
+        assert _counters(strategy)["orders_emitted"] == 0
+
+    def test_adopting_the_wrong_side_flips_on_the_next_bar(self) -> None:
+        strategy = _strategy()
+        strategy.seed(self._seed_bars(["100", "100", "103"]))
+        strategy.adopt_position(-40)
+        [intent] = _feed(strategy, [_day_bar(3, close="103")])
+        assert intent.requested_position == 40
+        assert intent.metadata["exit_reason"] == "flip"
+
+    def test_sizes_the_runtime_checks(self) -> None:
+        assert _strategy().required_order_size == 80
+        assert _strategy(position_contracts=1).required_order_size == 2
+        assert _strategy().daily_seed_days == 3

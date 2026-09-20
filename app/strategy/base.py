@@ -36,7 +36,7 @@ a no-op so quote strategies that do not care are unaffected.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +46,7 @@ from app.signals.models import TradeIntent
 
 if TYPE_CHECKING:
     from app.backtest.models import Bar
+    from app.strategy.daily import DailyBar
 
 
 class Strategy(ABC):
@@ -103,6 +104,32 @@ class Strategy(ABC):
         """
 
     @property
+    def required_order_size(self) -> int:
+        """The largest single order this strategy will ever ask for, or 0.
+
+        A state rule that flips from long to short sends ONE order of twice
+        its size. If ``MAX_ORDER_SIZE`` is below that, every flip is refused
+        and the strategy sits on the wrong side re-emitting the same intent
+        forever -- a stall the operator only notices in the counters. The
+        runtime compares this against the configured ceiling at startup and
+        refuses to start rather than run a strategy that cannot execute its
+        own rule. 0 means no requirement beyond the position size.
+        """
+        return 0
+
+    def adopt_position(self, position: int) -> None:  # noqa: B027
+        """Accept a position the runtime found at the broker as this strategy's.
+
+        Called once, at the first successful reconciliation of a run, before
+        the position-agreement check. A no-op default is deliberate: a
+        strategy whose management depends on its own entry price (stops
+        measured from the fill) has no honest way to adopt a position it did
+        not open, and must stay with the disable-and-flatten path. A pure
+        state rule -- "be long above the line" -- can, because the only fact
+        it needs about the position is its sign.
+        """
+
+    @property
     def position(self) -> int:
         """Signed contracts this strategy believes it holds.
 
@@ -130,6 +157,43 @@ class BarStrategy(Strategy):
     Fed by the backtest engine from stored history, and by the live runtime
     from the tick-to-bar builder -- see the module docstring.
     """
+
+    #: Set by the runtime when it wants to be told each time a UTC day
+    #: completes -- how live daily closes reach durable storage so a restart
+    #: does not start the warm-up from nothing. Strategies that roll days
+    #: call it; the replay leaves it None.
+    on_day_completed: Callable[[DailyBar], None] | None = None
+
+    @property
+    def daily_seed_days(self) -> int:
+        """How many completed daily bars this strategy wants fed before live
+        data starts, or 0 for none. A daily rule with a 50-day warm-up says
+        50; an intraday rule says 0 and is never seeded."""
+        return 0
+
+    @property
+    def seeding(self) -> bool:
+        return getattr(self, "_seeding", False)
+
+    def seed(self, bars: Iterable[Bar]) -> int:
+        """Feed historical bars to build state, emitting nothing.
+
+        Every bar goes through :meth:`on_bar` exactly as a live one would, so
+        the strategy's aggregates are what they would have been had it been
+        running -- but any intent it produces is discarded, and a strategy
+        that counts orders should check :attr:`seeding` before counting. The
+        position is untouched: see :meth:`adopt_position`. Returns the bars
+        fed.
+        """
+        self._seeding = True
+        count = 0
+        try:
+            for bar in bars:
+                self.on_bar(bar)
+                count += 1
+        finally:
+            self._seeding = False
+        return count
 
     def handle_bar(self, bar: Bar) -> Sequence[TradeIntent]:
         """Entry point used by the replay. Mirrors :meth:`handle_quote`."""

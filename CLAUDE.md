@@ -133,9 +133,18 @@ slippage ($9.32/contract round trip); the measured MSL spread is 5 ticks
 **Hold benchmark is −$96,278 this year** — SOL fell, so "beats buy-and-hold"
 is a near-worthless bar in this window. Read the zero-cost column instead.
 
-**Live vs replay.** `app/main.py:188` passes only `position_contracts` to the
-strategy. Every other rule is replay-only. Arming any of this needs new fields
-in `app/config.py` plus the passthrough in `main.py`.
+**Live wiring for sol-sma (2026-09-20) — paper-ready.** `.env`:
+`STRATEGY_NAME=sol-sma STRATEGY_POSITION_CONTRACTS=1 MAX_POSITION_CONTRACTS=1
+MAX_ORDER_SIZE=2 MAX_OPEN_ORDERS=2 TRADING_MODE=paper`; apply with `up -d
+--force-recreate`. At start the strategy is SEEDED with the last 50 completed
+days (its own live days — persisted to `bars` as `1d`/`live-sampled` as each
+completes — then the stored spot series via `STRATEGY_SEED_SOURCE/SYMBOL`,
+default coinbase/SOL-USD; `app/strategy/seed.py`), and ADOPTS the broker
+position at the first reconciliation (`adopt_position`; no-op for ORB, which
+still disables on mismatch). A restart costs the day in progress, not the
+warm-up. Startup refuses if `MAX_ORDER_SIZE < 2×size` (a flip is one 2-lot).
+Log `strategy.seeded` shows the mix. First ~50 live days blend spot into the
+SMA (basis, documented). ORB tunables remain replay-only.
 
 **Open items:** import 2021→2025 SOL history and re-run `strategy_compare.sh`
 — a ROBUSTNESS CHECK, not a verdict: at the implied per-trade Sharpe, n≈60

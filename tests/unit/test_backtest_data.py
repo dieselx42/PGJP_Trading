@@ -437,3 +437,48 @@ class TestCsvSource:
         source = CsvBarSource(path, source_name="mine", columns=self.COLUMNS)
         with pytest.raises(HistoricalSourceError, match=r":2:"):
             list(source.fetch(symbol="MSL", interval="1m", start=T0, end=T0 + timedelta(minutes=5)))
+
+
+class TestDailyCloses:
+    """The seed's spot fill: the last close of each UTC day, by time not by insertion."""
+
+    def test_last_close_per_utc_day_oldest_first_and_range_filtered(self) -> None:
+        from datetime import date
+
+        database = Database(":memory:")
+        database.connect()
+        database.migrate()
+        try:
+            repo = BarRepository(database)
+
+            def b(day: int, minute: int, close: str) -> Bar:
+                v = Decimal(close)
+                return Bar(
+                    source="coinbase",
+                    symbol="SOL-USD",
+                    interval="1m",
+                    opened_at=datetime(2026, 1, day, 0, minute, tzinfo=UTC),
+                    open=v,
+                    high=v,
+                    low=v,
+                    close=v,
+                )
+
+            # Day 6 is inserted later-minute first, so "last" must mean by time.
+            repo.insert_many([b(5, 0, "1"), b(5, 7, "2"), b(6, 3, "3"), b(6, 1, "4"), b(7, 0, "5")])
+            got = repo.daily_closes(source="coinbase", symbol="SOL-USD", interval="1m")
+            assert got == [
+                (date(2026, 1, 5), Decimal("2")),
+                (date(2026, 1, 6), Decimal("3")),
+                (date(2026, 1, 7), Decimal("5")),
+            ]
+            later = repo.daily_closes(
+                source="coinbase",
+                symbol="SOL-USD",
+                interval="1m",
+                start=datetime(2026, 1, 6, tzinfo=UTC),
+            )
+            assert [d for d, _ in later] == [date(2026, 1, 6), date(2026, 1, 7)]
+            assert repo.daily_closes(source="nope", symbol="SOL-USD", interval="1m") == []
+        finally:
+            database.close()

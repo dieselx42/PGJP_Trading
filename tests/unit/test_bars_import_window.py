@@ -22,7 +22,7 @@ class TestImportWindow:
         assert start == datetime(2025, 7, 1, tzinfo=UTC)
 
     def test_a_past_end_is_left_alone(self) -> None:
-        start, end, clamped = _import_window("2021-07-01", "2023-07-01", 365, now=NOW)
+        _start, end, clamped = _import_window("2021-07-01", "2023-07-01", 365, now=NOW)
         assert end == datetime(2023, 7, 1, tzinfo=UTC)
         assert clamped is False
 

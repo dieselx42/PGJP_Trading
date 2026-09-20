@@ -168,6 +168,54 @@ five, and no CME Solana contract existed before 2025 — so the five-year
 number measures whether the *signal* exists, not what the strategy would
 have earned.
 
+## Paper trading it
+
+The bot already selects a strategy by name and sizes it from `.env`; the
+rule's defaults are the registered spec, so there is nothing else to pass.
+The paper configuration is six lines:
+
+```
+STRATEGY_NAME=sol-sma
+STRATEGY_POSITION_CONTRACTS=1
+MAX_POSITION_CONTRACTS=1
+MAX_ORDER_SIZE=2
+MAX_OPEN_ORDERS=2
+TRADING_MODE=paper
+```
+
+`MAX_ORDER_SIZE=2` matters: a flip is one order that closes a side and
+opens the other, so it is twice the position. The bot now refuses to start
+if that ceiling is below what the strategy needs, rather than starting and
+having every flip refused in silence.
+
+Apply it with `docker compose up -d --force-recreate sol-trading-bot`
+(`restart` does not re-read `.env`).
+
+**What happens at start.** The rule needs 50 completed daily closes before
+its first decision, and strategy state lives in memory — so without help,
+every restart would mean 50 silent days, and a restart is how every `.env`
+change is applied. Instead, at start the bot hands the strategy the last 50
+completed days: days it recorded itself in earlier runs first (each
+completed live day is written to the database as it happens), then the
+stored spot series for anything older. It then adopts whatever position the
+broker reports at the first reconciliation. The first live bar of a new UTC
+day completes the last seeded day and makes the first decision; if the
+seeded rule disagrees with the adopted position, that bar flips it. A
+restart costs the day in progress, not the warm-up. The log line
+`strategy.seeded` says how many days came from where.
+
+**What to know about the first 50 live days.** Spot and the front-month
+future differ by the basis — usually under a percent, a dollar or two. Until
+50 live days have replaced the spot ones, the average is partly spot while
+the close it is compared against is the future, so a flip that lands near
+the line can come a day early or late. It fades day by day and is gone after
+50. The alternative was silence.
+
+**What the paper trial is for.** Not to re-test the edge — 26 weeks cannot.
+It measures what a flip actually costs on MSL (pre-registered kill K6: over
+$20 a contract ends it) and whether the live bar pipeline agrees with the
+replay (K5). Those are the two facts no backtest can supply.
+
 ## What to distrust
 
 - **Spot, not futures.** The replay is Coinbase spot; there is no basis, no

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 
 from app.backtest.models import Bar, BarGap, find_gaps, reports_volume, to_decimal
 from app.state.database import Database
@@ -137,6 +138,57 @@ class BarRepository:
         sql.append("ORDER BY opened_at ASC")
         rows = self._db.query_all(" ".join(sql), tuple(params))
         return tuple(_row_to_bar(row) for row in rows)
+
+    def daily_closes(
+        self,
+        *,
+        source: str,
+        symbol: str,
+        interval: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[tuple[date, Decimal]]:
+        """The last close of each UTC day in the range, oldest first.
+
+        Two indexed range queries rather than one correlated subquery: the
+        first finds each day's last bar, the second reads those bars' closes.
+        On a series of millions of rows a per-row correlated lookup is the
+        difference between a startup that takes a second and one that does
+        not finish.
+        """
+        sql = [
+            "SELECT substr(opened_at, 1, 10) AS day, MAX(opened_at) AS last_open FROM bars",
+            "WHERE source = ? AND symbol = ? AND interval = ?",
+        ]
+        params: list[object] = [source, symbol, interval]
+        if start is not None:
+            sql.append("AND opened_at >= ?")
+            params.append(to_iso(start))
+        if end is not None:
+            sql.append("AND opened_at < ?")
+            params.append(to_iso(end))
+        sql.append("GROUP BY day ORDER BY day ASC")
+        days = self._db.query_all(" ".join(sql), tuple(params))
+        if not days:
+            return []
+        closes: dict[str, Decimal] = {}
+        last_opens = [str(row["last_open"]) for row in days]
+        for i in range(0, len(last_opens), 500):  # stay under SQLite's variable cap
+            chunk = last_opens[i : i + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = self._db.query_all(
+                # Only "?" placeholders are interpolated; every value is bound.
+                f"SELECT opened_at, close FROM bars WHERE source = ? AND symbol = ? "  # noqa: S608
+                f"AND interval = ? AND opened_at IN ({marks})",
+                (source, symbol, interval, *chunk),
+            )
+            for row in rows:
+                closes[str(row["opened_at"])] = to_decimal(row["close"], field="close")
+        return [
+            (date.fromisoformat(str(row["day"])), closes[str(row["last_open"])])
+            for row in days
+            if str(row["last_open"]) in closes
+        ]
 
     def info(self, *, source: str, symbol: str, interval: str) -> BarSeriesInfo:
         bars = self.load(source=source, symbol=symbol, interval=interval)

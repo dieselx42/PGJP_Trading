@@ -259,6 +259,31 @@ class SolSmaStrategy(BarStrategy):
         """Signed contracts this strategy believes it holds. See base class."""
         return self._position
 
+    @property
+    def required_order_size(self) -> int:
+        """A flip is one order of twice the size; see the module docstring."""
+        return 2 * self._p.position_contracts
+
+    @property
+    def daily_seed_days(self) -> int:
+        """The window: 50 completed days and the first live bar decides."""
+        return self._p.sma_days
+
+    def adopt_position(self, position: int) -> None:
+        """Take the broker's position as ours. The rule needs only its sign:
+        if it disagrees with the seeded target, the next bar flips it, which
+        is exactly what a running instance would have done."""
+        self._position = position
+        self._emitted_last_bar = False
+        _LOG.info(
+            "sma adopted broker position",
+            extra={
+                "event": "sma.position_adopted",
+                "position": str(position),
+                "target": str(self._target),
+            },
+        )
+
     # ------------------------------------------------------------------
     # Fill feedback: the ONLY place position changes
     # ------------------------------------------------------------------
@@ -293,6 +318,13 @@ class SolSmaStrategy(BarStrategy):
         completed = self._daily.feed(bar)
         if completed is not None:
             self._decide(completed)
+            if self.on_day_completed is not None and not self.seeding:
+                # Live only: a seeded day is already in storage, and the
+                # replay never sets the hook.
+                self.on_day_completed(completed)
+        if self.seeding:
+            # State is built; no order is asked for and none is counted.
+            return ()
         return self._reconcile(bar)
 
     # -- the decision, once per completed day ------------------------------
