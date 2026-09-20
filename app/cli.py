@@ -32,7 +32,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
-from datetime import date, datetime, timedelta, UTC
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
