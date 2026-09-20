@@ -32,7 +32,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timedelta, UTC
 from pathlib import Path
 from typing import Any
 
@@ -587,6 +587,27 @@ def cmd_place_order(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK if payload.get("result") in {"SUBMITTED", "PREVIEW_ONLY"} else EXIT_ERROR
 
 
+def _import_window(
+    start_text: str | None, end_text: str | None, days: int, *, now: datetime
+) -> tuple[datetime, datetime, bool]:
+    """The [start, end) window an import asks the source for.
+
+    ``end`` is clamped to ``now``. The venues answer a request for candles in
+    the future with HTTP 400, and the fetcher pages forward from ``start``, so
+    an ``--end`` set to tomorrow fetches the whole range successfully and then
+    fails on the very last page -- reported as FETCH_FAILED after minutes of
+    good work, with every bar in fact stored. The clamp makes the last page
+    end at now instead. The third value says whether it applied, so the
+    result can record that the window it reports is not the one requested.
+    """
+    end = now if end_text is None else _parse_day(end_text)
+    clamped = end > now
+    if clamped:
+        end = now
+    start = end - timedelta(days=days) if start_text is None else _parse_day(start_text)
+    return start, end, clamped
+
+
 def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
     """Fetch historical bars into the local store.
 
@@ -597,7 +618,6 @@ def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
     one thing here that could not be tested before deployment, so fetch ten
     bars, look at them, and only then fetch a year.
     """
-    from datetime import timedelta  # noqa: PLC0415
 
     from app.backtest.models import Bar  # noqa: PLC0415
     from app.backtest.sources import (  # noqa: PLC0415
@@ -608,8 +628,7 @@ def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
     )
     from app.backtest.store import BarRepository  # noqa: PLC0415
 
-    end = datetime.now(UTC) if args.end is None else _parse_day(args.end)
-    start = end - timedelta(days=args.days) if args.start is None else _parse_day(args.start)
+    start, end, end_clamped = _import_window(args.start, args.end, args.days, now=datetime.now(UTC))
     if start >= end:
         _emit({"result": "INVALID_RANGE", "start": start.isoformat(), "end": end.isoformat()})
         return EXIT_ERROR
@@ -690,6 +709,7 @@ def cmd_bars_import(config: Config, args: argparse.Namespace) -> int:
                     "interval": args.interval,
                     "start": start.isoformat(),
                     "end": end.isoformat(),
+                    "end_clamped_to_now": end_clamped,
                     "limit": args.limit,
                 },
                 "fetched": fetched,
