@@ -497,6 +497,18 @@ the tradeable strategy. Survivorship: SOL is analysed because it is large now.
 The §9 year is inside the window. One rule, one instrument, one pre-registered
 run; a second look at any of it is a new section.
 
+**Live-trial amendment, 2026-09-21 — trade 1 is excluded from K6.** The
+paper trial's first decision (signal day 2026-09-20) was missed: the broker
+connection died at ~00:00 UTC and the bot spent the night in a reconnect
+loop. After a manual gateway restart the rule decided and filled at 13:49
+UTC at $118.15, roughly fourteen hours late and some $5/SOL away from where
+the decision's own close sat. K6 measures the fill against the mid at the
+decision bar's close over the first ten flips; including this one would
+report ~$125/contract against a $20 threshold and fire a kill for an outage
+rather than for execution cost. **K6 therefore counts flips 2–11.** Written
+before any of those flips exist, and it is the only amendment: the trade
+still counts for P&L, for the trade log, and for K5 and K7.
+
 **Verdict (run 2026-09-20, 2021-07-01 → 2026-09-20, 40 contracts):
 INCONCLUSIVE — suggestive, not shown.**
 

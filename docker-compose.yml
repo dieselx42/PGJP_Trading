@@ -134,6 +134,25 @@ services:
     volumes:
       - ib-gateway-settings:/home/ibgateway/Jts
 
+    # Does the gateway still accept API connections? Twice it has stopped
+    # doing so while the container stayed up and `docker compose ps` said
+    # nothing -- a 26-day outage in August, and 2026-09-21 when the bot's feed
+    # died at ~00:00 UTC and the strategy missed its first decision.
+    #
+    # This makes that state VISIBLE. It does not fix it: Docker marks an
+    # unhealthy container unhealthy and leaves it running (restarting on
+    # health is Swarm/Kubernetes behaviour, not Compose). The thing that acts
+    # is scripts/broker_watchdog.sh on the host; see docs/OPERATIONS.md.
+    #
+    # start_period is generous because a cold gateway downloads, configures
+    # and logs in before it listens.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/4002' 2>/dev/null"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
     security_opt:
       - no-new-privileges:true
 

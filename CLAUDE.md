@@ -145,6 +145,20 @@ Run: `scripts/strategy_compare.sh --fresh --only g --out /tmp/g -- --start
 --split 2024-01-01`. n<15 → TOO FEW SIGNALS, not a verdict. Designed after
 seeing Aug 2026, which is inside the window — discount accordingly.
 
+**OPERATIONS — the recurring failure (see `docs/OPERATIONS.md`).** IB Gateway
+stops accepting API connections while its container stays up; the bot
+reconnect-loops and nothing trades. Twice: 26 days in August, and 2026-09-21
+at ~00:00 UTC (missed the paper trial's first decision; filled 14h late at
+$118.15). **Cause still unknown** — August showed an IBC re-auth line,
+September showed nothing. `scripts/broker_watchdog.sh` (cron every 5 min,
+3 failures ≈ 15 min, one restart per 30 min) captures diagnostics to
+`logs/watchdog/incident-*/` BEFORE restarting gateway then bot. Read that
+directory after any restart — it is the only evidence. The gateway now has a
+TCP healthcheck for VISIBILITY only: Compose does not restart on unhealthy,
+and restarting the bot cannot fix a stuck gateway (shared netns).
+**K6 amendment (§10): the trial's trade 1 is excluded from the execution-cost
+kill; K6 counts flips 2–11.**
+
 **Replay costs understate reality by 40%.** The fill model uses 1 tick of
 slippage ($9.32/contract round trip); the measured MSL spread is 5 ticks
 (~$13.08). Every net number in the comparison is optimistic by that factor.
